@@ -176,10 +176,23 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     const s = t.indexOf('{'), e = t.lastIndexOf('}');
     if (s === -1 || e === -1) return null;
     let raw = t.slice(s, e + 1);
-    try { return JSON.parse(raw); }
+    const parse = v => {
+      const obj = JSON.parse(v);
+      return typeof obj === 'string' && obj.trim().startsWith('{')
+        ? JSON.parse(obj)
+        : obj;
+    };
+    try { return parse(raw); }
     catch (_) {
-      try { return JSON.parse(raw.replace(/,\s*([}\]])/g, '$1')); }
-      catch (__) { return null; }
+      try { return parse(raw.replace(/,\s*([}\]])/g, '$1')); }
+      catch (__) {
+        try {
+          const repaired = raw
+            .replace(/,\s*([}\]])/g, '$1')
+            .replace(/[\r\n]+(?=(?:[^"]*"[^"]*")*[^"]*$)/g, '');
+          return parse(repaired);
+        } catch (___) { return null; }
+      }
     }
   }
 
@@ -563,19 +576,25 @@ personaNotes 覆盖 16 个代码；全部用中文。`;
   function normalizeSummary(obj, round) {
     const canned = cannedSummary(round);
     const arr = v => Array.isArray(v) ? v.filter(Boolean).map(String) : [];
-    const notes = Array.isArray(obj && obj.personaNotes)
+    const parsedNotes = Array.isArray(obj && obj.personaNotes)
       ? obj.personaNotes.map(n => ({
         code: String(n && n.code ? n.code : '').toUpperCase(),
         takeaway: String(n && n.takeaway ? n.takeaway : '').trim(),
       })).filter(n => n.code && n.takeaway).slice(0, 16)
       : [];
+    const noteMap = new Map(canned.personaNotes.map(n => [n.code, n.takeaway]));
+    parsedNotes.forEach(n => noteMap.set(n.code, n.takeaway));
+    const notes = (window.PERSONAS || []).map(p => ({
+      code: p.code,
+      takeaway: noteMap.get(p.code) || p.essence,
+    }));
     return {
       headline: obj && obj.headline ? String(obj.headline) : canned.headline,
       overview: obj && obj.overview ? String(obj.overview) : canned.overview,
       agreements: arr(obj && obj.agreements).slice(0, 4).length ? arr(obj.agreements).slice(0, 4) : canned.agreements,
       tensions: arr(obj && obj.tensions).slice(0, 4).length ? arr(obj.tensions).slice(0, 4) : canned.tensions,
       nextSteps: arr(obj && obj.nextSteps).slice(0, 4).length ? arr(obj.nextSteps).slice(0, 4) : canned.nextSteps,
-      personaNotes: notes.length ? notes : canned.personaNotes,
+      personaNotes: notes,
     };
   }
 
@@ -586,6 +605,7 @@ personaNotes 覆盖 16 个代码；全部用中文。`;
       .trim();
     if (!cleaned) return null;
     const canned = cannedSummary(round);
+    if (cleaned.startsWith('{')) return canned;
     return { ...canned, overview: cleaned.slice(0, 700) };
   }
 

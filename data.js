@@ -1,5 +1,4 @@
-/* 16 MBTI personas — grouped by temperament. Single accent system;
-   groups differ only by label + monogram, not color. */
+/* 16 MBTI personas — grouped by temperament with distinct color families. */
 window.GROUPS = {
   NT: { code: 'NT', label: '分析家', en: 'Analysts', tone: 'purple', colorName: '紫人',
     summary: '偏系统、战略与抽象推理，擅长把问题拆成长期结构。' },

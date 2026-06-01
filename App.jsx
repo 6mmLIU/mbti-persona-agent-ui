@@ -50,37 +50,73 @@ function useReducedMotion() {
   return r;
 }
 
-function SummaryPanel({ summary }) {
+function looseJSONObject(text) {
+  if (!text || typeof text !== 'string') return null;
+  let raw = text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const s = raw.indexOf('{');
+  const e = raw.lastIndexOf('}');
+  if (s === -1 || e === -1 || e <= s) return null;
+  raw = raw.slice(s, e + 1);
+  const repaired = raw.replace(/,\s*([}\]])/g, '$1').replace(/[\r\n]+(?=(?:[^"]*"[^"]*")*[^"]*$)/g, '');
+  try { return JSON.parse(repaired); } catch (_) { return null; }
+}
+
+function displaySummary(summary) {
   if (!summary) return null;
-  const notes = Array.isArray(summary.personaNotes) ? summary.personaNotes : [];
+  const embedded = looseJSONObject(summary.overview);
+  if (embedded && (embedded.headline || embedded.overview)) {
+    return {
+      ...summary,
+      ...embedded,
+      personaNotes: Array.isArray(embedded.personaNotes) && embedded.personaNotes.length >= 16
+        ? embedded.personaNotes
+        : summary.personaNotes,
+    };
+  }
+  if (typeof summary.overview === 'string' && summary.overview.trim().startsWith('{')) {
+    return { ...summary, overview: '本轮总结已整理为下方的共识、分歧、下一步和各人格保留观点。' };
+  }
+  return summary;
+}
+
+function toneForCode(code) {
+  const p = (window.PERSONAS || []).find(x => x.code === code);
+  const g = p && window.GROUPS[p.group];
+  return g ? g.tone : 'blue';
+}
+
+function SummaryPanel({ summary }) {
+  const view = displaySummary(summary);
+  if (!view) return null;
+  const notes = Array.isArray(view.personaNotes) ? view.personaNotes : [];
   return (
     <section className="summary-panel" aria-label="本轮总结">
       <div className="summary-panel__main">
         <span className="summary-panel__mark"><Icon name="spark" size={17} /></span>
         <div>
-          <h3>{summary.headline || '本轮总结'}</h3>
-          <p>{summary.overview}</p>
+          <h3>{view.headline || '本轮总结'}</h3>
+          <p>{view.overview}</p>
         </div>
       </div>
       <div className="summary-grid">
         <div>
           <span className="pcard__label">共识</span>
-          <ul>{(summary.agreements || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+          <ul>{(view.agreements || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
         </div>
         <div>
           <span className="pcard__label">分歧</span>
-          <ul>{(summary.tensions || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+          <ul>{(view.tensions || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
         </div>
         <div>
           <span className="pcard__label">下一步</span>
-          <ul>{(summary.nextSteps || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+          <ul>{(view.nextSteps || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
         </div>
       </div>
       {notes.length > 0 && (
         <div className="summary-notes" aria-label="各人格保留观点">
           {notes.map(n => (
-            <span key={n.code} className="summary-note">
-              <b>{n.code}</b>{n.takeaway}
+            <span key={n.code} className="summary-note" data-tone={toneForCode(n.code)}>
+              <b>{n.code}</b><span>{n.takeaway}</span>
             </span>
           ))}
         </div>
