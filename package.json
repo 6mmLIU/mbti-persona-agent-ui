@@ -1,0 +1,12 @@
+{
+  "name": "mbti-persona-agent-ui",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check llm.js && node --check data.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
