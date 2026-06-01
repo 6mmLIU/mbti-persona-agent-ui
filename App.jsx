@@ -225,6 +225,8 @@ function App() {
   const [view, setView] = useState('list');           // grid | list
   const [viewingHistory, setViewingHistory] = useState(null);
   const [activeHistoryId, setActiveHistoryId] = useState(null);
+  const [activeRoundIndex, setActiveRoundIndex] = useState(0);
+  const [roundDirection, setRoundDirection] = useState('next');
 
   const gridRef = useRef(null);
   const prevRects = useRef(null);
@@ -232,6 +234,16 @@ function App() {
 
   const doneCount = results ? Object.values(results).filter(r => r.status !== 'loading').length : 0;
   const totalCount = window.PERSONAS.length;
+  const currentRoundIndex = rounds.length ? Math.min(activeRoundIndex, rounds.length - 1) : 0;
+  const currentRound = rounds[currentRoundIndex] || null;
+
+  useEffect(() => {
+    if (!rounds.length && activeRoundIndex !== 0) {
+      setActiveRoundIndex(0);
+    } else if (rounds.length && activeRoundIndex > rounds.length - 1) {
+      setActiveRoundIndex(rounds.length - 1);
+    }
+  }, [rounds.length, activeRoundIndex]);
 
   function updateRound(id, patch) {
     setRounds(prev => prev.map(r => r.id === id ? { ...r, ...(typeof patch === 'function' ? patch(r) : patch) } : r));
@@ -264,7 +276,10 @@ function App() {
     const baseRounds = append ? rounds : [];
     const roundId = window.uid();
     const historyId = append && activeHistoryId ? activeHistoryId : window.uid();
+    const nextRoundIndex = baseRounds.length;
     setActiveHistoryId(historyId);
+    setRoundDirection(append ? 'next' : 'reset');
+    setActiveRoundIndex(nextRoundIndex);
     setRoute('home');
     setViewingHistory(null);
     setQuestion(q);
@@ -298,6 +313,7 @@ function App() {
     const finalRound = { ...newRound, results: collected, status: 'done' };
     const finalRounds = [...baseRounds, finalRound];
     setRounds(finalRounds);
+    setActiveRoundIndex(finalRounds.length - 1);
     setResults(collected);
     saveConversation(historyId, finalRounds);
     const failed = Object.values(collected).filter(r => r.status === 'error').length;
@@ -312,6 +328,8 @@ function App() {
       : [{ id: h.id + '-r1', index: 1, ts: h.ts, question: h.question, results: h.results || {}, status: 'done' }];
     const last = restored[restored.length - 1];
     setRounds(restored);
+    setRoundDirection('reset');
+    setActiveRoundIndex(Math.max(restored.length - 1, 0));
     setQuestion(last.question);
     setResults(last.results);
     setViewingHistory(h);
@@ -365,6 +383,13 @@ function App() {
       updateRound(roundId, { summaryStatus: 'error', summaryError: err.message || '总结失败' });
       toast(err.message || '总结失败', 'close');
     }
+  }
+
+  function showRound(index) {
+    const next = Math.max(0, Math.min(index, rounds.length - 1));
+    if (next === currentRoundIndex) return;
+    setRoundDirection(next > currentRoundIndex ? 'next' : 'prev');
+    setActiveRoundIndex(next);
   }
 
   function onFav(payload) {
@@ -517,7 +542,9 @@ function App() {
                     {viewingHistory ? '历史回应' : (running ? '人格正在思考…' : '16 种人格的回应')}
                   </h2>
                   <p className="results__q">
-                    {rounds.length > 1 ? `${rounds.length} 轮对话 · 最新问题：「${question}」` : `「${question}」`}
+                    {rounds.length > 1 && currentRound
+                      ? `${rounds.length} 轮对话 · 当前第 ${currentRoundIndex + 1} 轮：「${currentRound.question}」`
+                      : `「${question}」`}
                   </p>
                 </div>
                 <span className="spacer" />
@@ -539,12 +566,35 @@ function App() {
                 </div>
               )}
 
-              <div className="round-stack">
-                {rounds.map((round, i) => (
-                  <RoundPanel key={round.id} round={round} isLatest={i === rounds.length - 1}
-                              view={view} gridRef={gridRef} onFav={onFav} store={store}
-                              onRetry={retryOne} onSummarize={summarizeRound} running={running} />
-                ))}
+              <div className="round-carousel" data-direction={roundDirection}>
+                {rounds.length > 1 && (
+                  <aside className="round-switch" aria-label="轮次切换">
+                    <button type="button" className="round-switch__btn"
+                            onClick={() => showRound(currentRoundIndex - 1)}
+                            disabled={currentRoundIndex === 0}
+                            aria-label="上一轮">
+                      <Icon name="chevron" size={18} className="ico--left" />
+                      <span>上一轮</span>
+                    </button>
+                    <span className="round-switch__count" aria-live="polite">
+                      {currentRoundIndex + 1}<small>/ {rounds.length}</small>
+                    </span>
+                    <button type="button" className="round-switch__btn"
+                            onClick={() => showRound(currentRoundIndex + 1)}
+                            disabled={currentRoundIndex >= rounds.length - 1}
+                            aria-label="下一轮">
+                      <span>下一轮</span>
+                      <Icon name="chevron" size={18} />
+                    </button>
+                  </aside>
+                )}
+                <div className="round-viewport">
+                  {currentRound && (
+                    <RoundPanel key={currentRound.id} round={currentRound} isLatest={true}
+                                view={view} gridRef={gridRef} onFav={onFav} store={store}
+                                onRetry={retryOne} onSummarize={summarizeRound} running={running} />
+                  )}
+                </div>
               </div>
               {!running && rounds.length > 0 && !viewingHistory && (
                 <FollowupComposer value={followupDraft}
