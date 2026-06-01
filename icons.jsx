@@ -24,6 +24,7 @@ const Icon = ({ name, size = 20, stroke = 1.75, className = '' }) => {
     user:   <><circle {...p} cx="12" cy="8.5" r="3.7"/><path {...p} d="M5 20a7 7 0 0 1 14 0"/></>,
     layers: <><path {...p} d="M12 3.5 21 8l-9 4.5L3 8z"/><path {...p} d="M3 13l9 4.5L21 13"/></>,
     bookmark:<><path {...p} d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-3.4L5.5 20V5.5a1 1 0 0 1 1-1z"/></>,
+    database:<><ellipse {...p} cx="12" cy="6" rx="7" ry="3"/><path {...p} d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path {...p} d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></>,
   };
   return (
     <span className={'ico ' + className} aria-hidden="true" style={{ width: size, height: size }}>

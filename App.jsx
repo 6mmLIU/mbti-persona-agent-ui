@@ -9,6 +9,14 @@ const EXAMPLE_QS = [
   '给一家小咖啡馆想几个让顾客愿意复购的主意。',
 ];
 
+const RESEARCH_EXAMPLE_QS = [
+  '使用 AI 帮独立开发者获得可见收入，有哪些真实机会？',
+  '最近 Reddit 上大家抱怨最多的效率工具痛点是什么？',
+  '有什么适合一个人快速验证的 SaaS 小产品方向？',
+];
+
+const RESEARCH_SUBREDDITS = ['SideProject', 'startups', 'Entrepreneur', 'SaaS', 'indiehackers'];
+
 function PersonaPreview({ personas, presetName }) {
   return (
     <aside className="preview" aria-label="16 种人格预览">
@@ -145,6 +153,70 @@ function SummaryPanel({ summary, round }) {
   );
 }
 
+function formatSourceDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+}
+
+function ResearchEvidencePanel({ research, loading, error, compact = false }) {
+  const items = research && Array.isArray(research.items) ? research.items : [];
+  const isEmpty = !loading && !error && !items.length;
+  if (isEmpty && compact) return null;
+  return (
+    <section className={'research-evidence' + (compact ? ' research-evidence--compact' : '')}
+             aria-label="Reddit 调研数据">
+      <div className="research-evidence__head">
+        <span className="research-evidence__mark"><Icon name="database" size={17} /></span>
+        <div>
+          <h3>{loading ? '正在抓取 Reddit 数据' : (isEmpty ? '等待调研数据' : 'Reddit 真实素材')}</h3>
+          <p>
+            {loading
+              ? '正在搜索相关帖子，完成后会把这些素材注入 16 个人格的思考上下文。'
+              : error
+                ? error
+                : isEmpty
+                  ? '输入议题后，会从这些社区抓取真实帖子，再交给 16 种人格继续分析。'
+                  : `检索「${research.query}」，抓到 ${items.length} 条帖子 · ${research.source || 'reddit-rss'}`}
+          </p>
+        </div>
+      </div>
+      {isEmpty && (
+        <div className="research-empty" aria-label="默认 Reddit 社区">
+          {RESEARCH_SUBREDDITS.map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
+        </div>
+      )}
+      {items.length > 0 && (
+        <div className="research-source-list">
+          {items.slice(0, compact ? 4 : 8).map((item, i) => (
+            <a className="research-source" href={item.url} target="_blank" rel="noreferrer" key={`${item.url}-${i}`}>
+              <span className="research-source__meta">
+                r/{item.subreddit || 'reddit'}
+                {item.author ? ` · u/${item.author}` : ''}
+                {item.publishedAt ? ` · ${formatSourceDate(item.publishedAt)}` : ''}
+              </span>
+              <strong>{item.title}</strong>
+              {item.excerpt && <span className="research-source__excerpt">{item.excerpt}</span>}
+            </a>
+          ))}
+        </div>
+      )}
+      {loading && (
+        <div className="research-source-list">
+          {[0, 1, 2].map(i => (
+            <div className="research-source research-source--loading" key={i}>
+              <span className="skel" />
+              <span className="skel" />
+              <span className="skel" />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onSummarize, running }) {
   const results = round.results || {};
   const doneCount = Object.values(results).filter(r => r && r.status !== 'loading').length;
@@ -171,6 +243,7 @@ function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onS
       {round.summaryStatus === 'error' && (
         <p className="round-error" role="status">总结失败：{round.summaryError || '请稍后重试'}</p>
       )}
+      {round.research && <ResearchEvidencePanel research={round.research} compact={true} />}
       {summarizing && (
         <div className="summary-panel summary-panel--loading" role="status">
           <span className="dot" />正在把 16 个人格的观点整理成可追问的上下文…
@@ -209,14 +282,153 @@ function FollowupComposer({ value, onChange, onSubmit, running, viewingHistory }
   );
 }
 
+function ResearchRoute({ value, onChange, onSubmit, onFetchOnly, loading, running, research, error, presetName, modelLabel }) {
+  return (
+      <section className="container research-hero" aria-labelledby="research-title">
+        <div className="research-hero__copy">
+          <span className="eyebrow">Reddit Research</span>
+          <h1 className="research-hero__title" id="research-title">先抓真实帖子，再让 16 种人格判断。</h1>
+          <p className="research-hero__sub">
+            数据模式会快速搜索 Reddit 相关讨论，把真实用户的痛点、实验和反馈注入同一套人格圆桌。
+            当前设定：{presetName || '无'}。当前模型：{modelLabel}。
+          </p>
+          <form className="research-ask" onSubmit={onSubmit}>
+            <textarea className="ask__ta" rows={3} value={value}
+                      aria-label="输入调研议题"
+                      placeholder="输入一个需要调研的议题，例如：独立开发者如何用 AI 赚到第一份可见收入？"
+                      onChange={e => onChange(e.target.value)} />
+            <div className="research-ask__actions">
+              <button className="btn btn--ghost" type="button"
+                      disabled={!value.trim() || loading || running}
+                      data-loading={loading ? 'true' : 'false'}
+                      onClick={onFetchOnly}>
+                {loading && <span className="btn__spin" />}
+                <Icon name="database" size={17} /><span className="btn__label">只抓数据</span>
+              </button>
+              <button className="btn btn--primary" type="submit"
+                      disabled={!value.trim() || loading || running}
+                      data-loading={(loading || running) ? 'true' : 'false'}>
+                {(loading || running) && <span className="btn__spin" />}
+                <Icon name="send" size={17} /><span className="btn__label">抓取并思考</span>
+              </button>
+            </div>
+          </form>
+          <div className="research-subs" aria-label="默认调研社区">
+            {RESEARCH_SUBREDDITS.map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
+          </div>
+          <div className="chips" role="list" aria-label="调研示例">
+            {RESEARCH_EXAMPLE_QS.map((q, i) => (
+              <button key={i} className="chip" role="listitem" onClick={() => onChange(q)}>
+                {q.length > 22 ? q.slice(0, 22) + '…' : q}
+              </button>
+            ))}
+          </div>
+        </div>
+        <ResearchEvidencePanel research={research} loading={loading} error={error} />
+      </section>
+  );
+}
+
+function ResultsSection({
+  results, running, viewingHistory, rounds, currentRound, currentRoundIndex,
+  question, doneCount, totalCount, view, changeView, showRound, roundDirection,
+  gridRef, onFav, store, retryOne, summarizeRound, followupDraft, setFollowupDraft,
+  runAsk, onExitHistory,
+}) {
+  if (!results) return null;
+  const isResearch = currentRound && currentRound.mode === 'research';
+  return (
+    <section className="container results" aria-label={isResearch ? '数据调研回应' : '人格回应'}>
+      <div className="results__bar">
+        <div>
+          <h2 className="results__h">
+            {viewingHistory ? '历史回应' : (running ? '人格正在思考…' : (isResearch ? '数据调研回应' : '16 种人格的回应'))}
+          </h2>
+          <p className="results__q">
+            {rounds.length > 1 && currentRound
+              ? `${rounds.length} 轮对话 · 当前第 ${currentRoundIndex + 1} 轮：「${currentRound.question}」`
+              : `「${question}」`}
+          </p>
+        </div>
+        <span className="spacer" />
+        {viewingHistory && (
+          <button className="btn btn--quiet" onClick={onExitHistory}>
+            <Icon name="close" size={16} /><span className="btn__label">退出历史</span>
+          </button>
+        )}
+        <div className="viewtoggle" role="group" aria-label="视图切换">
+          <button aria-pressed={view === 'grid'} onClick={() => changeView('grid')} aria-label="网格视图" title="网格"><Icon name="grid" size={18} /></button>
+          <button aria-pressed={view === 'list'} onClick={() => changeView('list')} aria-label="列表视图" title="列表"><Icon name="list" size={18} /></button>
+        </div>
+      </div>
+
+      {running && (
+        <div className="runbanner" role="status">
+          <span className="dot" />
+          正在让每个人格独立思考 · 已完成 {doneCount} / {totalCount}
+        </div>
+      )}
+
+      <div className="round-carousel" data-direction={roundDirection}>
+        {rounds.length > 1 && (
+          <aside className="round-switch" aria-label="轮次切换">
+            <button type="button" className="round-switch__btn round-switch__btn--up"
+                    onClick={() => showRound(currentRoundIndex - 1)}
+                    disabled={currentRoundIndex === 0}
+                    aria-label="上一轮">
+              <Icon name="chevron" size={26} className="ico--up" />
+            </button>
+            <span className="round-switch__count" aria-live="polite">
+              <b>{currentRoundIndex + 1}</b><small>/ {rounds.length}</small>
+            </span>
+            <button type="button" className="round-switch__btn round-switch__btn--down"
+                    onClick={() => showRound(currentRoundIndex + 1)}
+                    disabled={currentRoundIndex >= rounds.length - 1}
+                    aria-label="下一轮">
+              <Icon name="chevron" size={26} className="ico--down" />
+            </button>
+          </aside>
+        )}
+        <div className="round-viewport">
+          {currentRound && (
+            <RoundPanel key={currentRound.id} round={currentRound} isLatest={true}
+                        view={view} gridRef={gridRef} onFav={onFav} store={store}
+                        onRetry={retryOne} onSummarize={summarizeRound} running={running} />
+          )}
+        </div>
+      </div>
+      {!running && rounds.length > 0 && !viewingHistory && (
+        <FollowupComposer value={followupDraft}
+                          onChange={setFollowupDraft}
+                          running={running}
+                          onSubmit={e => {
+                            e.preventDefault();
+                            const next = followupDraft.trim();
+                            if (!next) return;
+                            setFollowupDraft('');
+                            runAsk(next, {
+                              append: true,
+                              mode: currentRound && currentRound.mode,
+                              research: currentRound && currentRound.research,
+                            });
+                          }} />
+      )}
+    </section>
+  );
+}
+
 function App() {
   const store = window.useStore();
   const toast = window.useToast();
   const reduced = useReducedMotion();
 
-  const [route, setRoute] = useState('home');        // home | history | favorites
+  const [route, setRoute] = useState('home');        // home | research | history | favorites
   const [showPresets, setShowPresets] = useState(false);
   const [draft, setDraft] = useState('');
+  const [researchDraft, setResearchDraft] = useState('');
+  const [researchData, setResearchData] = useState(null);
+  const [researchLoading, setResearchLoading] = useState(false);
+  const [researchError, setResearchError] = useState('');
   const [question, setQuestion] = useState('');
   const [results, setResults] = useState(null);       // { CODE: {status,...} }
   const [rounds, setRounds] = useState([]);
@@ -236,6 +448,7 @@ function App() {
   const totalCount = window.PERSONAS.length;
   const currentRoundIndex = rounds.length ? Math.min(activeRoundIndex, rounds.length - 1) : 0;
   const currentRound = rounds[currentRoundIndex] || null;
+  const isResearchRound = currentRound && currentRound.mode === 'research';
 
   useEffect(() => {
     if (!rounds.length && activeRoundIndex !== 0) {
@@ -257,10 +470,56 @@ function App() {
       question: roundList[0] ? roundList[0].question : '',
       latestQuestion: last ? last.question : '',
       roundCount: roundList.length,
+      mode: last && last.mode ? last.mode : 'standard',
+      research: last && last.research ? last.research : null,
       presetName: store.activePresetObj ? store.activePresetObj.name : '',
       results: last ? last.results : {},
       rounds: roundList,
     };
+  }
+
+  async function fetchResearch(qRaw) {
+    const q = (qRaw || researchDraft).trim();
+    if (!q) return null;
+    setResearchLoading(true);
+    setResearchError('');
+    try {
+      const resp = await fetch('/api/reddit-research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: q,
+          subreddits: RESEARCH_SUBREDDITS,
+          timeWindow: 'month',
+          limit: 12,
+        }),
+      });
+      const payload = await resp.json().catch(() => null);
+      if (!resp.ok || !payload || !payload.items || !payload.items.length) {
+        const msg = payload && payload.error && payload.error.message
+          ? payload.error.message
+          : 'Reddit 调研抓取失败';
+        throw new Error(msg);
+      }
+      setResearchData(payload);
+      return payload;
+    } catch (err) {
+      const msg = err && err.message ? err.message : 'Reddit 调研抓取失败';
+      setResearchError(msg);
+      toast(msg, 'close');
+      return null;
+    } finally {
+      setResearchLoading(false);
+    }
+  }
+
+  async function runResearchAsk(e) {
+    if (e) e.preventDefault();
+    const q = researchDraft.trim();
+    if (!q || running || researchLoading) return;
+    const research = await fetchResearch(q);
+    if (!research) return;
+    await runAsk(q, { mode: 'research', research });
   }
 
   function saveConversation(id, roundList) {
@@ -274,13 +533,16 @@ function App() {
     if (!q || running) return;
     const append = !!(options && options.append);
     const baseRounds = append ? rounds : [];
+    const previousResearch = append && baseRounds.length ? baseRounds[baseRounds.length - 1].research : null;
+    const research = (options && options.research) || previousResearch || null;
+    const mode = (options && options.mode) || (research ? 'research' : 'standard');
     const roundId = window.uid();
     const historyId = append && activeHistoryId ? activeHistoryId : window.uid();
     const nextRoundIndex = baseRounds.length;
     setActiveHistoryId(historyId);
     setRoundDirection(append ? 'next' : 'reset');
     setActiveRoundIndex(nextRoundIndex);
-    setRoute('home');
+    setRoute(mode === 'research' ? 'research' : 'home');
     setViewingHistory(null);
     setQuestion(q);
     setRunning(true);
@@ -296,6 +558,8 @@ function App() {
       status: 'running',
       summary: null,
       summaryStatus: 'idle',
+      mode,
+      research,
     };
     setRounds([...baseRounds, newRound]);
     setTimeout(() => {
@@ -308,9 +572,9 @@ function App() {
       collected[code] = payload;
       setResults(prev => ({ ...prev, [code]: payload }));
       updateRound(roundId, r => ({ results: { ...r.results, [code]: payload } }));
-    }, 6, baseRounds);
+    }, 6, baseRounds, research);
     setRunning(false);
-    const finalRound = { ...newRound, results: collected, status: 'done' };
+    const finalRound = { ...newRound, results: collected, status: 'done', mode, research };
     const finalRounds = [...baseRounds, finalRound];
     setRounds(finalRounds);
     setActiveRoundIndex(finalRounds.length - 1);
@@ -319,7 +583,9 @@ function App() {
     const failed = Object.values(collected).filter(r => r.status === 'error').length;
     toast(failed
       ? `已完成，${failed} 个人格使用兜底示例`
-      : (store.modelReady ? '16 个人格已通过模型回应' : '已生成示例回应（未连接模型）'), 'spark');
+      : (mode === 'research'
+        ? `已结合 ${research && research.items ? research.items.length : 0} 条 Reddit 素材生成回应`
+        : (store.modelReady ? '16 个人格已通过模型回应' : '已生成示例回应（未连接模型）')), 'spark');
   }
 
   function openHistory(h) {
@@ -334,7 +600,10 @@ function App() {
     setResults(last.results);
     setViewingHistory(h);
     setActiveHistoryId(h.id);
-    setRoute('home');
+    setResearchData(last.research || h.research || null);
+    setResearchDraft(last.question || h.latestQuestion || h.question || '');
+    setResearchError('');
+    setRoute(last.mode === 'research' || h.mode === 'research' ? 'research' : 'home');
     setRunning(false);
     window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' });
   }
@@ -346,7 +615,7 @@ function App() {
     const previousRounds = rounds.slice(0, idx);
     updateRound(roundId, r => ({ results: { ...r.results, [persona.code]: { status: 'loading' } } }));
     if (idx === rounds.length - 1) setResults(prev => ({ ...prev, [persona.code]: { status: 'loading' } }));
-    window.LLM.askPersona(persona, round.question, store.activePresetObj, store.data.modelConfig, previousRounds).then(res => {
+    window.LLM.askPersona(persona, round.question, store.activePresetObj, store.data.modelConfig, previousRounds, round.research).then(res => {
       const nextPayload = { status: 'done', ...res };
       const updatedRounds = rounds.map(r => r.id === roundId
         ? { ...r, results: { ...r.results, [persona.code]: nextPayload }, summary: null, summaryStatus: 'idle' }
@@ -355,7 +624,7 @@ function App() {
       if (idx === rounds.length - 1) setResults(prev => ({ ...prev, [persona.code]: nextPayload }));
       saveConversation(activeHistoryId, updatedRounds);
     }).catch(err => {
-      const fallback = { status: 'error', _error: err.message, ...window.LLM.cannedAnswer(persona, round.question) };
+      const fallback = { status: 'error', _error: err.message, ...window.LLM.cannedAnswer(persona, round.question, round.research) };
       const updatedRounds = rounds.map(r => r.id === roundId
         ? { ...r, results: { ...r.results, [persona.code]: fallback }, summary: null, summaryStatus: 'idle' }
         : r);
@@ -464,6 +733,9 @@ function App() {
             <button className="nav__btn" aria-current={route === 'home' ? 'page' : undefined} onClick={() => setRoute('home')}>
               <Icon name="home" size={18} /><span className="nav-label">主页</span>
             </button>
+            <button className="nav__btn" aria-current={route === 'research' ? 'page' : undefined} onClick={() => setRoute('research')}>
+              <Icon name="database" size={18} /><span className="nav-label">数据</span>
+            </button>
             <button className="nav__btn" aria-current={route === 'history' ? 'page' : undefined} onClick={() => setRoute('history')}>
               <Icon name="clock" size={18} /><span className="nav-label">历史</span>
               {store.data.history.length > 0 && <span className="nav__count">{store.data.history.length}</span>}
@@ -512,6 +784,11 @@ function App() {
                   {preset ? preset.name : '无'}
                   <span className="presetchip__edit" aria-hidden="true"><Icon name="chevDown" size={15} /></span>
                 </button>
+                <button className="presetchip presetchip--data" onClick={() => { setResearchDraft(draft || researchDraft); setRoute('research'); }}>
+                  <Icon name="database" size={16} />
+                  <span className="presetchip__k">调研模式</span>
+                  数据
+                </button>
                 <span className={'askmeta__hint' + (running ? '' : '')}>
                   {running ? `思考中 ${doneCount}/${totalCount}…` : 'Ctrl/⌘ + Enter 发送'}
                 </span>
@@ -534,79 +811,47 @@ function App() {
 
           <div id="results-anchor" />
 
-          {results && (
-            <section className="container results" aria-label="人格回应">
-              <div className="results__bar">
-                <div>
-                  <h2 className="results__h">
-                    {viewingHistory ? '历史回应' : (running ? '人格正在思考…' : '16 种人格的回应')}
-                  </h2>
-                  <p className="results__q">
-                    {rounds.length > 1 && currentRound
-                      ? `${rounds.length} 轮对话 · 当前第 ${currentRoundIndex + 1} 轮：「${currentRound.question}」`
-                      : `「${question}」`}
-                  </p>
-                </div>
-                <span className="spacer" />
-                {viewingHistory && (
-                  <button className="btn btn--quiet" onClick={() => { setResults(null); setRounds([]); setViewingHistory(null); setActiveHistoryId(null); setQuestion(''); }}>
-                    <Icon name="close" size={16} /><span className="btn__label">退出历史</span>
-                  </button>
-                )}
-                <div className="viewtoggle" role="group" aria-label="视图切换">
-                  <button aria-pressed={view === 'grid'} onClick={() => changeView('grid')} aria-label="网格视图" title="网格"><Icon name="grid" size={18} /></button>
-                  <button aria-pressed={view === 'list'} onClick={() => changeView('list')} aria-label="列表视图" title="列表"><Icon name="list" size={18} /></button>
-                </div>
-              </div>
+          {results && !isResearchRound && (
+            <ResultsSection
+              results={results} running={running} viewingHistory={viewingHistory}
+              rounds={rounds} currentRound={currentRound} currentRoundIndex={currentRoundIndex}
+              question={question} doneCount={doneCount} totalCount={totalCount}
+              view={view} changeView={changeView} showRound={showRound} roundDirection={roundDirection}
+              gridRef={gridRef} onFav={onFav} store={store} retryOne={retryOne}
+              summarizeRound={summarizeRound} followupDraft={followupDraft}
+              setFollowupDraft={setFollowupDraft} runAsk={runAsk}
+              onExitHistory={() => { setResults(null); setRounds([]); setViewingHistory(null); setActiveHistoryId(null); setQuestion(''); }}
+            />
+          )}
+        </main>
+      )}
 
-              {running && (
-                <div className="runbanner" role="status">
-                  <span className="dot" />
-                  正在让每个人格独立思考 · 已完成 {doneCount} / {totalCount}
-                </div>
-              )}
-
-              <div className="round-carousel" data-direction={roundDirection}>
-                {rounds.length > 1 && (
-                  <aside className="round-switch" aria-label="轮次切换">
-                    <button type="button" className="round-switch__btn round-switch__btn--up"
-                            onClick={() => showRound(currentRoundIndex - 1)}
-                            disabled={currentRoundIndex === 0}
-                            aria-label="上一轮">
-                      <Icon name="chevron" size={26} className="ico--up" />
-                    </button>
-                    <span className="round-switch__count" aria-live="polite">
-                      <b>{currentRoundIndex + 1}</b><small>/ {rounds.length}</small>
-                    </span>
-                    <button type="button" className="round-switch__btn round-switch__btn--down"
-                            onClick={() => showRound(currentRoundIndex + 1)}
-                            disabled={currentRoundIndex >= rounds.length - 1}
-                            aria-label="下一轮">
-                      <Icon name="chevron" size={26} className="ico--down" />
-                    </button>
-                  </aside>
-                )}
-                <div className="round-viewport">
-                  {currentRound && (
-                    <RoundPanel key={currentRound.id} round={currentRound} isLatest={true}
-                                view={view} gridRef={gridRef} onFav={onFav} store={store}
-                                onRetry={retryOne} onSummarize={summarizeRound} running={running} />
-                  )}
-                </div>
-              </div>
-              {!running && rounds.length > 0 && !viewingHistory && (
-                <FollowupComposer value={followupDraft}
-                                  onChange={setFollowupDraft}
-                                  running={running}
-                                  onSubmit={e => {
-                                    e.preventDefault();
-                                    const next = followupDraft.trim();
-                                    if (!next) return;
-                                    setFollowupDraft('');
-                                    runAsk(next, { append: true });
-                                  }} />
-              )}
-            </section>
+      {route === 'research' && (
+        <main>
+          <ResearchRoute
+            value={researchDraft}
+            onChange={setResearchDraft}
+            onSubmit={runResearchAsk}
+            onFetchOnly={() => fetchResearch(researchDraft)}
+            loading={researchLoading}
+            running={running}
+            research={researchData}
+            error={researchError}
+            presetName={preset ? preset.name : '无'}
+            modelLabel={store.modelLabel}
+          />
+          <div id="results-anchor" />
+          {results && isResearchRound && (
+            <ResultsSection
+              results={results} running={running} viewingHistory={viewingHistory}
+              rounds={rounds} currentRound={currentRound} currentRoundIndex={currentRoundIndex}
+              question={question} doneCount={doneCount} totalCount={totalCount}
+              view={view} changeView={changeView} showRound={showRound} roundDirection={roundDirection}
+              gridRef={gridRef} onFav={onFav} store={store} retryOne={retryOne}
+              summarizeRound={summarizeRound} followupDraft={followupDraft}
+              setFollowupDraft={setFollowupDraft} runAsk={runAsk}
+              onExitHistory={() => { setResults(null); setRounds([]); setViewingHistory(null); setActiveHistoryId(null); setQuestion(''); }}
+            />
           )}
         </main>
       )}

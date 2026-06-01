@@ -145,11 +145,49 @@ window.LLM = (function () {
     return `此前对话上下文（本轮必须延续前文，避免重复上一轮已经说过的内容）：\n${parts.join('\n\n')}\n\n`;
   }
 
-  function buildPrompt(persona, question, preset, rounds) {
+  function researchDigest(research, maxItems = 8) {
+    const items = research && Array.isArray(research.items) ? research.items : [];
+    if (!items.length) return '';
+    return items.slice(0, maxItems).map((item, i) => {
+      const meta = [
+        item.subreddit ? `r/${item.subreddit}` : '',
+        item.author ? `u/${item.author}` : '',
+        item.score != null ? `${item.score} 分` : '',
+        item.comments != null ? `${item.comments} 评论` : '',
+      ].filter(Boolean).join(' · ');
+      return [
+        `${i + 1}. ${item.title}`,
+        meta ? `来源：${meta}` : '',
+        item.excerpt ? `摘录：${String(item.excerpt).slice(0, 280)}` : '',
+        item.url ? `链接：${item.url}` : '',
+      ].filter(Boolean).join('\n');
+    }).join('\n\n');
+  }
+
+  function researchBlock(research) {
+    const digest = researchDigest(research, 8);
+    if (!digest) return '';
+    const source = research.source ? `（${research.source}）` : '';
+    return `真实 Reddit 调研素材${source}：
+检索词：${research.query || '未记录'}
+覆盖社区：${Array.isArray(research.subreddits) ? research.subreddits.map(s => `r/${s}`).join(' / ') : 'Reddit'}
+
+${digest}
+
+使用要求：
+- 你必须把这些 Reddit 帖子当作真实用户需求和真实点子的证据来源，而不是装饰。
+- 可以引用帖子标题或社区，但不要捏造帖子里没有的信息。
+- 结论必须说明：你从这些真实数据里看到了什么需求/痛点/机会，以及你会怎样进一步取舍。
+- 点子要尽量从 Reddit 真实帖子里的问题、请求、实验和反馈中提炼。
+
+`;
+  }
+
+  function buildPrompt(persona, question, preset, rounds, research) {
     return `你是 MBTI 人格「${persona.code} · ${persona.name}」。你的思维特征：${persona.lens}
 请严格代入这种人格的思维方式来回应，不要中立、不要面面俱到，要有鲜明的角度与个性。
 
-${personaProfileBlock(persona)}${presetBlock(preset)}${conversationBlock(rounds, persona)}用户的问题 / 议题：
+${personaProfileBlock(persona)}${presetBlock(preset)}${conversationBlock(rounds, persona)}${researchBlock(research)}用户的问题 / 议题：
 「${question}」
 
 请只输出一个 JSON 对象，不要任何额外文字、不要 Markdown 代码块，键如下：
@@ -165,8 +203,8 @@ conclusion 是最重要的部分，要让人感觉 16 个人格都在用自己�
 ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags 为 2-4 个简短关键词。全部用中文。`;
   }
 
-  function buildMessages(persona, question, preset, rounds) {
-    return [{ role: 'user', content: buildPrompt(persona, question, preset, rounds) }];
+  function buildMessages(persona, question, preset, rounds, research) {
+    return [{ role: 'user', content: buildPrompt(persona, question, preset, rounds, research) }];
   }
 
   function extractJSON(text) {
@@ -286,10 +324,10 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     return e + '/chat/completions';
   }
 
-  async function requestOpenAICompatible(persona, question, preset, cfg, rounds, withJsonMode = true) {
+  async function requestOpenAICompatible(persona, question, preset, cfg, rounds, research, withJsonMode = true) {
     const body = {
       model: cfg.model,
-      messages: buildMessages(persona, question, preset, rounds),
+      messages: buildMessages(persona, question, preset, rounds, research),
       temperature: cfg.temperature,
       max_tokens: cfg.maxTokens,
       stream: false,
@@ -319,13 +357,13 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         : '';
     } catch (err) {
       if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
-        return requestOpenAICompatible(persona, question, preset, cfg, rounds, false);
+        return requestOpenAICompatible(persona, question, preset, cfg, rounds, research, false);
       }
       throw err;
     }
   }
 
-  async function requestAnthropic(persona, question, preset, cfg, rounds) {
+  async function requestAnthropic(persona, question, preset, cfg, rounds, research) {
     const data = await parseResponse(await modelFetch(cfg.endpoint || 'https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -338,7 +376,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         model: cfg.model,
         max_tokens: cfg.maxTokens,
         temperature: cfg.temperature,
-        messages: buildMessages(persona, question, preset, rounds),
+        messages: buildMessages(persona, question, preset, rounds, research),
       }),
     }));
     return data && Array.isArray(data.content)
@@ -346,11 +384,11 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       : '';
   }
 
-  async function requestGemini(persona, question, preset, cfg, rounds, withJsonMode = true) {
+  async function requestGemini(persona, question, preset, cfg, rounds, research, withJsonMode = true) {
     const url = (cfg.endpoint || 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent')
       .replace('{model}', encodeURIComponent(cfg.model));
     const body = {
-      contents: [{ role: 'user', parts: [{ text: buildPrompt(persona, question, preset, rounds) }] }],
+      contents: [{ role: 'user', parts: [{ text: buildPrompt(persona, question, preset, rounds, research) }] }],
       generationConfig: {
         temperature: cfg.temperature,
         maxOutputTokens: cfg.maxTokens,
@@ -372,7 +410,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       return Array.isArray(parts) ? parts.map(part => part.text || '').join('') : '';
     } catch (err) {
       if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
-        return requestGemini(persona, question, preset, cfg, rounds, false);
+        return requestGemini(persona, question, preset, cfg, rounds, research, false);
       }
       throw err;
     }
@@ -465,31 +503,31 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
   }
 
-  async function requestProvider(persona, question, preset, config, rounds) {
+  async function requestProvider(persona, question, preset, config, rounds, research) {
     const cfg = effectiveConfig(config);
     const text = cfg.kind === 'anthropic'
-      ? await requestAnthropic(persona, question, preset, cfg, rounds)
+      ? await requestAnthropic(persona, question, preset, cfg, rounds, research)
       : cfg.kind === 'gemini'
-        ? await requestGemini(persona, question, preset, cfg, rounds)
-        : await requestOpenAICompatible(persona, question, preset, cfg, rounds);
+        ? await requestGemini(persona, question, preset, cfg, rounds, research)
+        : await requestOpenAICompatible(persona, question, preset, cfg, rounds, research);
     const parsed = extractJSON(text);
     const fallback = parsed || textFallbackObject(text, persona, question);
     if (!fallback) throw new Error('模型返回了空内容，请重试或调高最大输出长度');
     return normalize(fallback, persona);
   }
 
-  async function requestBridge(persona, question, preset, rounds) {
-    const text = await window.claude.complete({ messages: buildMessages(persona, question, preset, rounds) });
+  async function requestBridge(persona, question, preset, rounds, research) {
+    const text = await window.claude.complete({ messages: buildMessages(persona, question, preset, rounds, research) });
     const parsed = extractJSON(text);
     if (!parsed) throw new Error('Claude 桥接没有返回可解析的 JSON');
     return normalize(parsed, persona);
   }
 
-  async function askPersona(persona, question, preset, modelConfig, rounds) {
+  async function askPersona(persona, question, preset, modelConfig, rounds, research) {
     if (isConfigured(modelConfig)) {
       let lastErr = null;
       for (let attempt = 0; attempt < 2; attempt++) {
-        try { return await requestProvider(persona, question, preset, modelConfig, rounds); }
+        try { return await requestProvider(persona, question, preset, modelConfig, rounds, research); }
         catch (err) {
           lastErr = err;
           if (!shouldRetryError(err)) break;
@@ -500,14 +538,14 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
 
     if (hasBridge) {
-      try { return await requestBridge(persona, question, preset, rounds); }
+      try { return await requestBridge(persona, question, preset, rounds, research); }
       catch (_) {}
     }
 
-    return cannedAnswer(persona, question);
+    return cannedAnswer(persona, question, research);
   }
 
-  async function askAll(personas, question, preset, modelConfig, onUpdate, concurrency = 6, rounds = []) {
+  async function askAll(personas, question, preset, modelConfig, onUpdate, concurrency = 6, rounds = [], research = null) {
     if (typeof modelConfig === 'function') {
       onUpdate = modelConfig;
       modelConfig = null;
@@ -518,10 +556,10 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         const idx = i++;
         const p = personas[idx];
         try {
-          const res = await askPersona(p, question, preset, modelConfig, rounds);
+          const res = await askPersona(p, question, preset, modelConfig, rounds, research);
           onUpdate(p.code, { status: 'done', ...res });
         } catch (e) {
-          onUpdate(p.code, { status: 'error', _error: e && e.message ? e.message : '请求失败', ...cannedAnswer(p, question) });
+          onUpdate(p.code, { status: 'error', _error: e && e.message ? e.message : '请求失败', ...cannedAnswer(p, question, research) });
         }
       }
     }
@@ -542,6 +580,18 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }).join('\n\n');
   }
 
+  function roundResearchDigest(round) {
+    const research = round && round.research;
+    const digest = researchDigest(research, 10);
+    if (!digest) return '本轮没有启用外部调研数据。';
+    return [
+      `检索词：${research.query || round.question}`,
+      `来源：${research.source || 'Reddit'}`,
+      Array.isArray(research.subreddits) ? `社区：${research.subreddits.map(s => `r/${s}`).join(' / ')}` : '',
+      digest,
+    ].filter(Boolean).join('\n');
+  }
+
   function buildSummaryPrompt(round, previousRounds) {
     const prev = Array.isArray(previousRounds) && previousRounds.length
       ? previousRounds.slice(-3).map((r, i) => {
@@ -557,6 +607,9 @@ ${prev}
 
 本轮问题：
 「${round.question}」
+
+本轮真实调研数据：
+${roundResearchDigest(round)}
 
 本轮 16 个人格输出：
 ${roundDigest(round)}
@@ -628,8 +681,16 @@ personaNotes 必须覆盖 16 个代码，每个 takeaway 都要完整收句，�
     return askPersona(persona, '确认 API 已连接，并用完整 JSON 给一个简短结论和测试点子。', null, { ...config, enabled: true });
   }
 
-  function fallbackConclusion(persona, question) {
+  function researchSignal(research) {
+    const items = research && Array.isArray(research.items) ? research.items : [];
+    if (!items.length) return '';
+    const names = items.slice(0, 3).map(item => `「${item.title}」`).join('、');
+    return `我会把 Reddit 里这些真实帖子 ${names} 当成需求证据，先从里面提炼重复出现的痛点，再决定哪些点子值得继续验证。`;
+  }
+
+  function fallbackConclusion(persona, question, research) {
     const q = (question || '这个议题').replace(/[「」]/g, '').trim();
+    const data = researchSignal(research);
     const byCode = {
       INTJ: `我的结论是，「${q}」不能只展示热闹的 16 种回答，而要形成一套可反复扩展的思维系统。我会先定义核心使用路径：提问、对比、归纳、保存，再把每个人格的差异做成可观察的结构。先验证一个高价值场景，确认用户真的需要多视角决策，再继续扩展。`,
       INTP: `我会先把「${q}」的概念边界厘清：它到底是在做人格娱乐、创意发散，还是辅助决策？我的结论是，价值来自可比较的思维差异，而不是 16 段相似文本。下一步要设计可检验的输出结构，让每个人格都暴露自己的假设、推理链和盲点。`,
@@ -654,10 +715,19 @@ personaNotes 必须覆盖 16 个代码，每个 takeaway 都要完整收句，�
       SJ: `我的结论很清楚，「${q}」要先变成稳定可靠的流程。`,
       SP: `我的结论是，先把「${q}」做成一个能马上体验的小版本。`,
     };
-    return byCode[persona.code] || byGroup[persona.group] || `我的结论是，围绕这个人格最看重的角度先做取舍，再把想法压缩成一个能马上验证的小行动。`;
+    const base = byCode[persona.code] || byGroup[persona.group] || `我的结论是，围绕这个人格最看重的角度先做取舍，再把想法压缩成一个能马上验证的小行动。`;
+    return data ? `${base} ${data}` : base;
   }
 
-  function cannedAnswer(persona, question) {
+  function researchIdeas(research) {
+    const items = research && Array.isArray(research.items) ? research.items : [];
+    return items.slice(0, 3).map(item => {
+      const title = String(item.title || '').replace(/\s+/g, ' ').trim();
+      return title ? `围绕 Reddit 帖「${title.slice(0, 28)}」提炼一个可验证实验` : '';
+    }).filter(Boolean);
+  }
+
+  function cannedAnswer(persona, question, research) {
     const q = (question || '这个议题').replace(/[「」]/g, '').trim();
     const seeds = {
       NT: [`为「${q}」建立一个可验证的核心假设，再设计最小实验`, `找出影响最大的那一个变量，集中资源攻它`, `画出未来三步的演化路径，倒推现在该做什么`],
@@ -665,9 +735,10 @@ personaNotes 必须覆盖 16 个代码，每个 takeaway 都要完整收句，�
       SJ: [`把「${q}」拆成清晰的步骤清单与责任人`, `先复用已被验证的成熟做法，降低风险`, `定义可交付物与时间表，确保稳妥落地`],
       SP: [`关于「${q}」，先做一个能马上试的小版本`, `抓住眼前最现成的机会快速上手`, `把体验中的关键一刻做到足够爽`],
     };
+    const groundedIdeas = researchIdeas(research);
     return { signature: persona.sig, thinking: persona.essence,
-             conclusion: fallbackConclusion(persona, question),
-             ideas: seeds[persona.group] || [], tags: persona.tags };
+             conclusion: fallbackConclusion(persona, question, research),
+             ideas: groundedIdeas.length ? groundedIdeas : (seeds[persona.group] || []), tags: persona.tags };
   }
 
   function cannedSummary(round) {

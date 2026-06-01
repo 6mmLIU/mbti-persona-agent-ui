@@ -424,8 +424,21 @@ button { cursor: pointer; }
   .hitem:hover,
   .chip:hover,
   .presetchip:hover,
+  .research-source:hover,
   .round-switch__btn:hover {
     transform: none !important;
     box-shadow: none !important;
+  }
+  .round-switch:hover,
+  .round-switch__btn:hover::before {
+    transform: none !important;
+  }
+  .round-switch__btn--up:hover .ico--up,
+  .round-switch__btn--up:active .ico--up {
+    transform: rotate(-90deg) !important;
+  }
+  .round-switch__btn--down:hover .ico--down,
+  .round-switch__btn--down:active .ico--down {
+    transform: rotate(90deg) !important;
   }
 }
