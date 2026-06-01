@@ -61,22 +61,42 @@ function looseJSONObject(text) {
   try { return JSON.parse(repaired); } catch (_) { return null; }
 }
 
-function displaySummary(summary) {
+function noteFromRound(code, round) {
+  const r = round && round.results ? round.results[code] : null;
+  return r && (r.conclusion || r.thinking) ? String(r.conclusion || r.thinking).trim() : '';
+}
+
+function completePersonaNotes(notes, round) {
+  const fromSummary = new Map((Array.isArray(notes) ? notes : []).map(n => [
+    String(n && n.code ? n.code : '').toUpperCase(),
+    String(n && n.takeaway ? n.takeaway : '').trim(),
+  ]));
+  return (window.PERSONAS || []).map(p => {
+    const full = noteFromRound(p.code, round);
+    return {
+      code: p.code,
+      takeaway: full || fromSummary.get(p.code) || p.essence,
+    };
+  });
+}
+
+function displaySummary(summary, round) {
   if (!summary) return null;
   const embedded = looseJSONObject(summary.overview);
+  const summaryNotes = completePersonaNotes(summary.personaNotes, round);
   if (embedded && (embedded.headline || embedded.overview)) {
     return {
       ...summary,
       ...embedded,
       personaNotes: Array.isArray(embedded.personaNotes) && embedded.personaNotes.length >= 16
-        ? embedded.personaNotes
-        : summary.personaNotes,
+        ? completePersonaNotes(embedded.personaNotes, round)
+        : summaryNotes,
     };
   }
   if (typeof summary.overview === 'string' && summary.overview.trim().startsWith('{')) {
-    return { ...summary, overview: '本轮总结已整理为下方的共识、分歧、下一步和各人格保留观点。' };
+    return { ...summary, overview: '本轮总结已整理为下方的共识、分歧、下一步和各人格保留观点。', personaNotes: summaryNotes };
   }
-  return summary;
+  return { ...summary, personaNotes: summaryNotes };
 }
 
 function toneForCode(code) {
@@ -85,8 +105,8 @@ function toneForCode(code) {
   return g ? g.tone : 'blue';
 }
 
-function SummaryPanel({ summary }) {
-  const view = displaySummary(summary);
+function SummaryPanel({ summary, round }) {
+  const view = displaySummary(summary, round);
   if (!view) return null;
   const notes = Array.isArray(view.personaNotes) ? view.personaNotes : [];
   return (
@@ -156,7 +176,7 @@ function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onS
           <span className="dot" />正在把 16 个人格的观点整理成可追问的上下文…
         </div>
       )}
-      {round.summary && <SummaryPanel summary={round.summary} />}
+      {round.summary && <SummaryPanel summary={round.summary} round={round} />}
 
       <div className="persona-grid" data-view={view} ref={isLatest ? gridRef : null}>
         {window.PERSONAS.map((p, i) => (
@@ -170,11 +190,11 @@ function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onS
   );
 }
 
-function FollowupComposer({ value, onChange, onSubmit, running }) {
+function FollowupComposer({ value, onChange, onSubmit, running, viewingHistory }) {
   return (
     <form className="followup" onSubmit={onSubmit}>
       <div>
-        <span className="pcard__label">继续追问</span>
+        <span className="pcard__label">{viewingHistory ? '继续追问这条历史' : '继续追问'}</span>
         <textarea rows={2} value={value}
                   aria-label="继续追问"
                   placeholder="基于上面的总结继续问，例如：哪些方案最适合我现在立刻做？"
@@ -183,7 +203,7 @@ function FollowupComposer({ value, onChange, onSubmit, running }) {
       <button className="btn btn--primary" type="submit" disabled={!value.trim() || running}
               data-loading={running ? 'true' : 'false'}>
         {running && <span className="btn__spin" />}
-        <Icon name="send" size={17} /><span className="btn__label">开启下一轮</span>
+        <Icon name="send" size={17} /><span className="btn__label">追问并开启下一轮</span>
       </button>
     </form>
   );

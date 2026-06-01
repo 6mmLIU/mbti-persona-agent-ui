@@ -536,7 +536,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       const ideas = Array.isArray(r.ideas) ? r.ideas : [];
       return [
         `${persona.code} ${persona.name}`,
-        `结论：${(r.conclusion || r.thinking || '').slice(0, 180)}`,
+        `结论：${(r.conclusion || r.thinking || '').slice(0, 360)}`,
         ideas.length ? `点子：${ideas.slice(0, 3).join('；')}` : '',
       ].filter(Boolean).join('\n');
     }).join('\n\n');
@@ -568,9 +568,9 @@ ${roundDigest(round)}
   "agreements": ["主要共识1", "主要共识2", "主要共识3"],
   "tensions": ["关键分歧/张力1", "张力2"],
   "nextSteps": ["下一步建议1", "下一步建议2", "下一步建议3"],
-  "personaNotes": [{"code":"INTJ","takeaway":"该人格最值得保留的一句话"}, {"code":"INTP","takeaway":"..."}]
+  "personaNotes": [{"code":"INTJ","takeaway":"该人格的完整观点摘要（80-140字，必须是完整句子，不要截断）"}, {"code":"INTP","takeaway":"..."}]
 }
-personaNotes 覆盖 16 个代码；全部用中文。`;
+personaNotes 必须覆盖 16 个代码，每个 takeaway 都要完整收句，不能以半句话结尾；全部用中文。`;
   }
 
   function normalizeSummary(obj, round) {
@@ -612,7 +612,8 @@ personaNotes 覆盖 16 个代码；全部用中文。`;
   async function summarizeRound(round, previousRounds, modelConfig) {
     if (isConfigured(modelConfig)) {
       const cfg = effectiveConfig(modelConfig);
-      const text = await requestPromptText(buildSummaryPrompt(round, previousRounds), cfg);
+      const summaryCfg = { ...cfg, maxTokens: Math.max(Number(cfg.maxTokens) || 0, 3200) };
+      const text = await requestPromptText(buildSummaryPrompt(round, previousRounds), summaryCfg);
       const parsed = extractJSON(text);
       const fallback = parsed || textFallbackSummary(text, round);
       if (!fallback) throw new Error('模型没有返回可总结的内容');
@@ -676,7 +677,7 @@ personaNotes 覆盖 16 个代码；全部用中文。`;
       const r = results[persona.code] || {};
       return {
         code: persona.code,
-        takeaway: (r.conclusion || r.thinking || persona.essence).slice(0, 72),
+        takeaway: (r.conclusion || r.thinking || persona.essence),
       };
     });
     return {
