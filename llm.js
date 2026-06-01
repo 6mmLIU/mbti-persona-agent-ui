@@ -111,11 +111,45 @@ window.LLM = (function () {
     return lines.length ? '提问者补充设定：\n' + lines.join('\n') + '\n\n' : '';
   }
 
-  function buildPrompt(persona, question, preset) {
+  function personaProfileBlock(persona) {
+    const rows = [
+      ['说话语气', persona.voice],
+      ['决策偏好', persona.decision],
+      ['常见盲点', persona.blindSpot],
+      ['反对什么', persona.against],
+      ['输出风格示例', persona.styleExample],
+    ].filter(row => row[1]);
+    if (!rows.length) return '';
+    return '这个人格的独立表达设定：\n' + rows.map(row => `- ${row[0]}：${row[1]}`).join('\n') + '\n\n';
+  }
+
+  function summaryText(summary) {
+    if (!summary) return '';
+    if (typeof summary === 'string') return summary;
+    return [summary.headline, summary.overview].filter(Boolean).join(' ');
+  }
+
+  function conversationBlock(rounds, persona) {
+    if (!Array.isArray(rounds) || !rounds.length) return '';
+    const visible = rounds.slice(-3);
+    const parts = visible.map((round, idx) => {
+      const own = round.results && round.results[persona.code] ? round.results[persona.code] : null;
+      const ownText = own ? (own.conclusion || own.thinking || '').slice(0, 180) : '';
+      const sum = summaryText(round.summary).slice(0, 220);
+      return [
+        `第 ${round.index || idx + 1} 轮问题：${round.question}`,
+        sum ? `该轮总结：${sum}` : '',
+        ownText ? `你上一轮的观点：${ownText}` : '',
+      ].filter(Boolean).join('\n');
+    });
+    return `此前对话上下文（本轮必须延续前文，避免重复上一轮已经说过的内容）：\n${parts.join('\n\n')}\n\n`;
+  }
+
+  function buildPrompt(persona, question, preset, rounds) {
     return `你是 MBTI 人格「${persona.code} · ${persona.name}」。你的思维特征：${persona.lens}
 请严格代入这种人格的思维方式来回应，不要中立、不要面面俱到，要有鲜明的角度与个性。
 
-${presetBlock(preset)}用户的问题 / 议题：
+${personaProfileBlock(persona)}${presetBlock(preset)}${conversationBlock(rounds, persona)}用户的问题 / 议题：
 「${question}」
 
 请只输出一个 JSON 对象，不要任何额外文字、不要 Markdown 代码块，键如下：
@@ -131,8 +165,8 @@ conclusion 是最重要的部分，要让人感觉 16 个人格都在用自己�
 ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags 为 2-4 个简短关键词。全部用中文。`;
   }
 
-  function buildMessages(persona, question, preset) {
-    return [{ role: 'user', content: buildPrompt(persona, question, preset) }];
+  function buildMessages(persona, question, preset, rounds) {
+    return [{ role: 'user', content: buildPrompt(persona, question, preset, rounds) }];
   }
 
   function extractJSON(text) {
@@ -239,10 +273,10 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     return e + '/chat/completions';
   }
 
-  async function requestOpenAICompatible(persona, question, preset, cfg, withJsonMode = true) {
+  async function requestOpenAICompatible(persona, question, preset, cfg, rounds, withJsonMode = true) {
     const body = {
       model: cfg.model,
-      messages: buildMessages(persona, question, preset),
+      messages: buildMessages(persona, question, preset, rounds),
       temperature: cfg.temperature,
       max_tokens: cfg.maxTokens,
       stream: false,
@@ -272,13 +306,13 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         : '';
     } catch (err) {
       if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
-        return requestOpenAICompatible(persona, question, preset, cfg, false);
+        return requestOpenAICompatible(persona, question, preset, cfg, rounds, false);
       }
       throw err;
     }
   }
 
-  async function requestAnthropic(persona, question, preset, cfg) {
+  async function requestAnthropic(persona, question, preset, cfg, rounds) {
     const data = await parseResponse(await modelFetch(cfg.endpoint || 'https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -291,7 +325,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         model: cfg.model,
         max_tokens: cfg.maxTokens,
         temperature: cfg.temperature,
-        messages: buildMessages(persona, question, preset),
+        messages: buildMessages(persona, question, preset, rounds),
       }),
     }));
     return data && Array.isArray(data.content)
@@ -299,11 +333,11 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       : '';
   }
 
-  async function requestGemini(persona, question, preset, cfg, withJsonMode = true) {
+  async function requestGemini(persona, question, preset, cfg, rounds, withJsonMode = true) {
     const url = (cfg.endpoint || 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent')
       .replace('{model}', encodeURIComponent(cfg.model));
     const body = {
-      contents: [{ role: 'user', parts: [{ text: buildPrompt(persona, question, preset) }] }],
+      contents: [{ role: 'user', parts: [{ text: buildPrompt(persona, question, preset, rounds) }] }],
       generationConfig: {
         temperature: cfg.temperature,
         maxOutputTokens: cfg.maxTokens,
@@ -325,37 +359,124 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       return Array.isArray(parts) ? parts.map(part => part.text || '').join('') : '';
     } catch (err) {
       if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
-        return requestGemini(persona, question, preset, cfg, false);
+        return requestGemini(persona, question, preset, cfg, rounds, false);
       }
       throw err;
     }
   }
 
-  async function requestProvider(persona, question, preset, config) {
+  async function requestPromptText(prompt, cfg, withJsonMode = true) {
+    if (cfg.kind === 'anthropic') {
+      const data = await parseResponse(await modelFetch(cfg.endpoint || 'https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': cfg.apiKey,
+          'anthropic-version': cfg.apiVersion || '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          max_tokens: cfg.maxTokens,
+          temperature: cfg.temperature,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      }));
+      return data && Array.isArray(data.content)
+        ? data.content.map(part => part && part.text ? part.text : '').join('')
+        : '';
+    }
+
+    if (cfg.kind === 'gemini') {
+      const url = (cfg.endpoint || 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent')
+        .replace('{model}', encodeURIComponent(cfg.model));
+      const body = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: cfg.temperature,
+          maxOutputTokens: cfg.maxTokens,
+        },
+      };
+      if (withJsonMode && cfg.jsonMode) body.generationConfig.responseMimeType = 'application/json';
+      try {
+        const data = await parseResponse(await modelFetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': cfg.apiKey,
+          },
+          body: JSON.stringify(body),
+        }));
+        const parts = data && data.candidates && data.candidates[0] &&
+          data.candidates[0].content && data.candidates[0].content.parts;
+        return Array.isArray(parts) ? parts.map(part => part.text || '').join('') : '';
+      } catch (err) {
+        if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
+          return requestPromptText(prompt, cfg, false);
+        }
+        throw err;
+      }
+    }
+
+    const body = {
+      model: cfg.model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: cfg.temperature,
+      max_tokens: cfg.maxTokens,
+      stream: false,
+    };
+    if (withJsonMode && cfg.jsonMode) body.response_format = { type: 'json_object' };
+    if (cfg.provider === 'deepseek') body.thinking = { type: 'disabled' };
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${cfg.apiKey}`,
+    };
+    if (cfg.provider === 'openrouter') {
+      headers['HTTP-Referer'] = window.location.origin;
+      headers['X-Title'] = 'MBTI Persona Matrix';
+    }
+    try {
+      const data = await parseResponse(await modelFetch(chatEndpoint(cfg.endpoint), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      }));
+      return data && data.choices && data.choices[0] && data.choices[0].message
+        ? data.choices[0].message.content
+        : '';
+    } catch (err) {
+      if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
+        return requestPromptText(prompt, cfg, false);
+      }
+      throw err;
+    }
+  }
+
+  async function requestProvider(persona, question, preset, config, rounds) {
     const cfg = effectiveConfig(config);
     const text = cfg.kind === 'anthropic'
-      ? await requestAnthropic(persona, question, preset, cfg)
+      ? await requestAnthropic(persona, question, preset, cfg, rounds)
       : cfg.kind === 'gemini'
-        ? await requestGemini(persona, question, preset, cfg)
-        : await requestOpenAICompatible(persona, question, preset, cfg);
+        ? await requestGemini(persona, question, preset, cfg, rounds)
+        : await requestOpenAICompatible(persona, question, preset, cfg, rounds);
     const parsed = extractJSON(text);
     const fallback = parsed || textFallbackObject(text, persona, question);
     if (!fallback) throw new Error('模型返回了空内容，请重试或调高最大输出长度');
     return normalize(fallback, persona);
   }
 
-  async function requestBridge(persona, question, preset) {
-    const text = await window.claude.complete({ messages: buildMessages(persona, question, preset) });
+  async function requestBridge(persona, question, preset, rounds) {
+    const text = await window.claude.complete({ messages: buildMessages(persona, question, preset, rounds) });
     const parsed = extractJSON(text);
     if (!parsed) throw new Error('Claude 桥接没有返回可解析的 JSON');
     return normalize(parsed, persona);
   }
 
-  async function askPersona(persona, question, preset, modelConfig) {
+  async function askPersona(persona, question, preset, modelConfig, rounds) {
     if (isConfigured(modelConfig)) {
       let lastErr = null;
       for (let attempt = 0; attempt < 2; attempt++) {
-        try { return await requestProvider(persona, question, preset, modelConfig); }
+        try { return await requestProvider(persona, question, preset, modelConfig, rounds); }
         catch (err) {
           lastErr = err;
           if (!shouldRetryError(err)) break;
@@ -366,14 +487,14 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
 
     if (hasBridge) {
-      try { return await requestBridge(persona, question, preset); }
+      try { return await requestBridge(persona, question, preset, rounds); }
       catch (_) {}
     }
 
     return cannedAnswer(persona, question);
   }
 
-  async function askAll(personas, question, preset, modelConfig, onUpdate, concurrency = 6) {
+  async function askAll(personas, question, preset, modelConfig, onUpdate, concurrency = 6, rounds = []) {
     if (typeof modelConfig === 'function') {
       onUpdate = modelConfig;
       modelConfig = null;
@@ -384,7 +505,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         const idx = i++;
         const p = personas[idx];
         try {
-          const res = await askPersona(p, question, preset, modelConfig);
+          const res = await askPersona(p, question, preset, modelConfig, rounds);
           onUpdate(p.code, { status: 'done', ...res });
         } catch (e) {
           onUpdate(p.code, { status: 'error', _error: e && e.message ? e.message : '请求失败', ...cannedAnswer(p, question) });
@@ -393,6 +514,91 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
     const pool = Array.from({ length: Math.min(concurrency, personas.length) }, worker);
     await Promise.all(pool);
+  }
+
+  function roundDigest(round) {
+    const results = round && round.results ? round.results : {};
+    return (window.PERSONAS || []).map(persona => {
+      const r = results[persona.code] || {};
+      const ideas = Array.isArray(r.ideas) ? r.ideas : [];
+      return [
+        `${persona.code} ${persona.name}`,
+        `结论：${(r.conclusion || r.thinking || '').slice(0, 180)}`,
+        ideas.length ? `点子：${ideas.slice(0, 3).join('；')}` : '',
+      ].filter(Boolean).join('\n');
+    }).join('\n\n');
+  }
+
+  function buildSummaryPrompt(round, previousRounds) {
+    const prev = Array.isArray(previousRounds) && previousRounds.length
+      ? previousRounds.slice(-3).map((r, i) => {
+        const sum = summaryText(r.summary);
+        return `第 ${r.index || i + 1} 轮：${r.question}${sum ? `\n总结：${sum}` : ''}`;
+      }).join('\n\n')
+      : '无';
+    return `你是一个严谨的主持人，正在整理一场 16 种 MBTI 人格的圆桌讨论。
+请总结本轮 16 个人格各自的想法、经验、共识和冲突，并保留可继续追问的上下文。
+
+此前对话：
+${prev}
+
+本轮问题：
+「${round.question}」
+
+本轮 16 个人格输出：
+${roundDigest(round)}
+
+请只输出一个 JSON 对象，不要 Markdown，不要额外解释：
+{
+  "headline": "一句话总判断（≤32字）",
+  "overview": "本轮综合总结（180-280字，说明主要共识、关键分歧和最值得保留的经验）",
+  "agreements": ["主要共识1", "主要共识2", "主要共识3"],
+  "tensions": ["关键分歧/张力1", "张力2"],
+  "nextSteps": ["下一步建议1", "下一步建议2", "下一步建议3"],
+  "personaNotes": [{"code":"INTJ","takeaway":"该人格最值得保留的一句话"}, {"code":"INTP","takeaway":"..."}]
+}
+personaNotes 覆盖 16 个代码；全部用中文。`;
+  }
+
+  function normalizeSummary(obj, round) {
+    const canned = cannedSummary(round);
+    const arr = v => Array.isArray(v) ? v.filter(Boolean).map(String) : [];
+    const notes = Array.isArray(obj && obj.personaNotes)
+      ? obj.personaNotes.map(n => ({
+        code: String(n && n.code ? n.code : '').toUpperCase(),
+        takeaway: String(n && n.takeaway ? n.takeaway : '').trim(),
+      })).filter(n => n.code && n.takeaway).slice(0, 16)
+      : [];
+    return {
+      headline: obj && obj.headline ? String(obj.headline) : canned.headline,
+      overview: obj && obj.overview ? String(obj.overview) : canned.overview,
+      agreements: arr(obj && obj.agreements).slice(0, 4).length ? arr(obj.agreements).slice(0, 4) : canned.agreements,
+      tensions: arr(obj && obj.tensions).slice(0, 4).length ? arr(obj.tensions).slice(0, 4) : canned.tensions,
+      nextSteps: arr(obj && obj.nextSteps).slice(0, 4).length ? arr(obj.nextSteps).slice(0, 4) : canned.nextSteps,
+      personaNotes: notes.length ? notes : canned.personaNotes,
+    };
+  }
+
+  function textFallbackSummary(text, round) {
+    const cleaned = String(text || '')
+      .replace(/^```(?:json)?/i, '')
+      .replace(/```$/,'')
+      .trim();
+    if (!cleaned) return null;
+    const canned = cannedSummary(round);
+    return { ...canned, overview: cleaned.slice(0, 700) };
+  }
+
+  async function summarizeRound(round, previousRounds, modelConfig) {
+    if (isConfigured(modelConfig)) {
+      const cfg = effectiveConfig(modelConfig);
+      const text = await requestPromptText(buildSummaryPrompt(round, previousRounds), cfg);
+      const parsed = extractJSON(text);
+      const fallback = parsed || textFallbackSummary(text, round);
+      if (!fallback) throw new Error('模型没有返回可总结的内容');
+      return normalizeSummary(fallback, round);
+    }
+    return cannedSummary(round);
   }
 
   async function testConfig(config) {
@@ -443,6 +649,26 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
              ideas: seeds[persona.group] || [], tags: persona.tags };
   }
 
+  function cannedSummary(round) {
+    const results = round && round.results ? round.results : {};
+    const done = Object.keys(results).filter(code => results[code] && results[code].status !== 'loading').length;
+    const personaNotes = (window.PERSONAS || []).map(persona => {
+      const r = results[persona.code] || {};
+      return {
+        code: persona.code,
+        takeaway: (r.conclusion || r.thinking || persona.essence).slice(0, 72),
+      };
+    });
+    return {
+      headline: '多视角已经形成',
+      overview: `本轮围绕「${round && round.question ? round.question : '这个议题'}」收集了 ${done || 16} 个人格视角。整体上，分析家偏向系统和假设验证，外交家强调意义与人的动机，守护者关注流程、责任和稳定落地，探险家更重视马上体验和快速反馈。下一轮可以追问：哪些观点最值得优先做，哪些风险需要先排除。`,
+      agreements: ['先把问题转成可验证的小行动', '保留不同人格的取舍依据', '让结果能够被保存和继续追问'],
+      tensions: ['长期系统设计与快速试错之间的取舍', '人的感受与执行效率之间的平衡'],
+      nextSteps: ['挑出 2-3 个高价值观点做优先级排序', '继续追问具体执行路径', '把冲突观点转成风险清单'],
+      personaNotes,
+    };
+  }
+
   return {
     providers: PROVIDERS,
     hasBridge,
@@ -451,6 +677,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     describeConfig,
     effectiveConfig,
     testConfig,
+    summarizeRound,
     askPersona,
     askAll,
     cannedAnswer,

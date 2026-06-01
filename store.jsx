@@ -97,6 +97,13 @@ function useStore() {
       const activePreset = d.activePreset === id ? (presets[0] ? presets[0].id : null) : d.activePreset;
       return { ...d, presets, activePreset };
     }),
+    saveHistoryEntry: (entry) => setData(d => {
+      const next = [
+        entry,
+        ...d.history.filter(h => h.id !== entry.id),
+      ].slice(0, 40);
+      return { ...d, history: next };
+    }),
     addHistory: (entry) => setData(d => ({ ...d, history: [entry, ...d.history].slice(0, 40) })),
     deleteHistory: (id) => setData(d => ({ ...d, history: d.history.filter(h => h.id !== id) })),
     toggleFavorite: (fav) => setData(d => {

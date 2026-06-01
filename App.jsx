@@ -50,6 +50,109 @@ function useReducedMotion() {
   return r;
 }
 
+function SummaryPanel({ summary }) {
+  if (!summary) return null;
+  const notes = Array.isArray(summary.personaNotes) ? summary.personaNotes : [];
+  return (
+    <section className="summary-panel" aria-label="本轮总结">
+      <div className="summary-panel__main">
+        <span className="summary-panel__mark"><Icon name="spark" size={17} /></span>
+        <div>
+          <h3>{summary.headline || '本轮总结'}</h3>
+          <p>{summary.overview}</p>
+        </div>
+      </div>
+      <div className="summary-grid">
+        <div>
+          <span className="pcard__label">共识</span>
+          <ul>{(summary.agreements || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+        </div>
+        <div>
+          <span className="pcard__label">分歧</span>
+          <ul>{(summary.tensions || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+        </div>
+        <div>
+          <span className="pcard__label">下一步</span>
+          <ul>{(summary.nextSteps || []).map((x, i) => <li key={i}>{x}</li>)}</ul>
+        </div>
+      </div>
+      {notes.length > 0 && (
+        <div className="summary-notes" aria-label="各人格保留观点">
+          {notes.map(n => (
+            <span key={n.code} className="summary-note">
+              <b>{n.code}</b>{n.takeaway}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onSummarize, running }) {
+  const results = round.results || {};
+  const doneCount = Object.values(results).filter(r => r && r.status !== 'loading').length;
+  const totalCount = window.PERSONAS.length;
+  const summarizing = round.summaryStatus === 'loading';
+  const canSummarize = doneCount === totalCount && !running && !summarizing;
+  return (
+    <article className="round-panel" data-current={isLatest ? 'true' : 'false'}>
+      <header className="round-head">
+        <div>
+          <span className="round-kicker">第 {round.index || 1} 轮</span>
+          <h3>{round.question}</h3>
+          <p>{round.status === 'running' ? `正在生成 ${doneCount}/${totalCount}` : `${doneCount}/${totalCount} 个人格已回应`}</p>
+        </div>
+        <button className="btn btn--ghost" type="button"
+                data-loading={summarizing ? 'true' : 'false'}
+                disabled={!canSummarize}
+                onClick={() => onSummarize(round.id)}>
+          {summarizing && <span className="btn__spin" />}
+          <Icon name="spark" size={17} /><span className="btn__label">{round.summary ? '重新总结' : '总结本轮'}</span>
+        </button>
+      </header>
+
+      {round.summaryStatus === 'error' && (
+        <p className="round-error" role="status">总结失败：{round.summaryError || '请稍后重试'}</p>
+      )}
+      {summarizing && (
+        <div className="summary-panel summary-panel--loading" role="status">
+          <span className="dot" />正在把 16 个人格的观点整理成可追问的上下文…
+        </div>
+      )}
+      {round.summary && <SummaryPanel summary={round.summary} />}
+
+      <div className="persona-grid" data-view={view} ref={isLatest ? gridRef : null}>
+        {window.PERSONAS.map((p, i) => (
+          <div data-flip={isLatest ? p.code : `${round.id}-${p.code}`} key={p.code}>
+            <PersonaCard persona={p} state={results[p.code]} view={view}
+                         index={i} onFav={onFav} isFav={store.isFav} onRetry={() => onRetry(p, round.id)} />
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function FollowupComposer({ value, onChange, onSubmit, running }) {
+  return (
+    <form className="followup" onSubmit={onSubmit}>
+      <div>
+        <span className="pcard__label">继续追问</span>
+        <textarea rows={2} value={value}
+                  aria-label="继续追问"
+                  placeholder="基于上面的总结继续问，例如：哪些方案最适合我现在立刻做？"
+                  onChange={e => onChange(e.target.value)} />
+      </div>
+      <button className="btn btn--primary" type="submit" disabled={!value.trim() || running}
+              data-loading={running ? 'true' : 'false'}>
+        {running && <span className="btn__spin" />}
+        <Icon name="send" size={17} /><span className="btn__label">开启下一轮</span>
+      </button>
+    </form>
+  );
+}
+
 function App() {
   const store = window.useStore();
   const toast = window.useToast();
@@ -60,9 +163,12 @@ function App() {
   const [draft, setDraft] = useState('');
   const [question, setQuestion] = useState('');
   const [results, setResults] = useState(null);       // { CODE: {status,...} }
+  const [rounds, setRounds] = useState([]);
+  const [followupDraft, setFollowupDraft] = useState('');
   const [running, setRunning] = useState(false);
   const [view, setView] = useState('list');           // grid | list
   const [viewingHistory, setViewingHistory] = useState(null);
+  const [activeHistoryId, setActiveHistoryId] = useState(null);
 
   const gridRef = useRef(null);
   const prevRects = useRef(null);
@@ -71,10 +177,38 @@ function App() {
   const doneCount = results ? Object.values(results).filter(r => r.status !== 'loading').length : 0;
   const totalCount = window.PERSONAS.length;
 
+  function updateRound(id, patch) {
+    setRounds(prev => prev.map(r => r.id === id ? { ...r, ...(typeof patch === 'function' ? patch(r) : patch) } : r));
+  }
+
+  function makeHistoryEntry(id, roundList) {
+    const last = roundList[roundList.length - 1];
+    return {
+      id,
+      ts: Date.now(),
+      question: roundList[0] ? roundList[0].question : '',
+      latestQuestion: last ? last.question : '',
+      roundCount: roundList.length,
+      presetName: store.activePresetObj ? store.activePresetObj.name : '',
+      results: last ? last.results : {},
+      rounds: roundList,
+    };
+  }
+
+  function saveConversation(id, roundList) {
+    if (!id || !roundList.length || !store.saveHistoryEntry) return;
+    store.saveHistoryEntry(makeHistoryEntry(id, roundList));
+  }
+
   /* --- ask --- */
-  async function runAsk(qRaw) {
+  async function runAsk(qRaw, options) {
     const q = (qRaw != null ? qRaw : draft).trim();
     if (!q || running) return;
+    const append = !!(options && options.append);
+    const baseRounds = append ? rounds : [];
+    const roundId = window.uid();
+    const historyId = append && activeHistoryId ? activeHistoryId : window.uid();
+    setActiveHistoryId(historyId);
     setRoute('home');
     setViewingHistory(null);
     setQuestion(q);
@@ -82,6 +216,17 @@ function App() {
     const init = {};
     window.PERSONAS.forEach(p => init[p.code] = { status: 'loading' });
     setResults(init);
+    const newRound = {
+      id: roundId,
+      index: baseRounds.length + 1,
+      ts: Date.now(),
+      question: q,
+      results: init,
+      status: 'running',
+      summary: null,
+      summaryStatus: 'idle',
+    };
+    setRounds([...baseRounds, newRound]);
     setTimeout(() => {
       const el = document.getElementById('results-anchor');
       if (el) window.scrollTo({ top: el.offsetTop - 80, behavior: reduced ? 'auto' : 'smooth' });
@@ -91,12 +236,14 @@ function App() {
     await window.LLM.askAll(window.PERSONAS, q, store.activePresetObj, store.data.modelConfig, (code, payload) => {
       collected[code] = payload;
       setResults(prev => ({ ...prev, [code]: payload }));
-    });
+      updateRound(roundId, r => ({ results: { ...r.results, [code]: payload } }));
+    }, 6, baseRounds);
     setRunning(false);
-    store.addHistory({
-      id: window.uid(), ts: Date.now(), question: q,
-      presetName: store.activePresetObj ? store.activePresetObj.name : '', results: collected,
-    });
+    const finalRound = { ...newRound, results: collected, status: 'done' };
+    const finalRounds = [...baseRounds, finalRound];
+    setRounds(finalRounds);
+    setResults(collected);
+    saveConversation(historyId, finalRounds);
     const failed = Object.values(collected).filter(r => r.status === 'error').length;
     toast(failed
       ? `已完成，${failed} 个人格使用兜底示例`
@@ -104,21 +251,64 @@ function App() {
   }
 
   function openHistory(h) {
-    setQuestion(h.question);
-    setResults(h.results);
+    const restored = h.rounds && h.rounds.length
+      ? h.rounds
+      : [{ id: h.id + '-r1', index: 1, ts: h.ts, question: h.question, results: h.results || {}, status: 'done' }];
+    const last = restored[restored.length - 1];
+    setRounds(restored);
+    setQuestion(last.question);
+    setResults(last.results);
     setViewingHistory(h);
+    setActiveHistoryId(h.id);
     setRoute('home');
     setRunning(false);
     window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' });
   }
 
-  function retryOne(persona) {
-    setResults(prev => ({ ...prev, [persona.code]: { status: 'loading' } }));
-    window.LLM.askPersona(persona, question, store.activePresetObj, store.data.modelConfig).then(res => {
-      setResults(prev => ({ ...prev, [persona.code]: { status: 'done', ...res } }));
+  function retryOne(persona, roundId) {
+    const idx = rounds.findIndex(r => r.id === roundId);
+    const round = idx >= 0 ? rounds[idx] : null;
+    if (!round) return;
+    const previousRounds = rounds.slice(0, idx);
+    updateRound(roundId, r => ({ results: { ...r.results, [persona.code]: { status: 'loading' } } }));
+    if (idx === rounds.length - 1) setResults(prev => ({ ...prev, [persona.code]: { status: 'loading' } }));
+    window.LLM.askPersona(persona, round.question, store.activePresetObj, store.data.modelConfig, previousRounds).then(res => {
+      const nextPayload = { status: 'done', ...res };
+      const updatedRounds = rounds.map(r => r.id === roundId
+        ? { ...r, results: { ...r.results, [persona.code]: nextPayload }, summary: null, summaryStatus: 'idle' }
+        : r);
+      setRounds(updatedRounds);
+      if (idx === rounds.length - 1) setResults(prev => ({ ...prev, [persona.code]: nextPayload }));
+      saveConversation(activeHistoryId, updatedRounds);
     }).catch(err => {
-      setResults(prev => ({ ...prev, [persona.code]: { status: 'error', _error: err.message, ...window.LLM.cannedAnswer(persona, question) } }));
+      const fallback = { status: 'error', _error: err.message, ...window.LLM.cannedAnswer(persona, round.question) };
+      const updatedRounds = rounds.map(r => r.id === roundId
+        ? { ...r, results: { ...r.results, [persona.code]: fallback }, summary: null, summaryStatus: 'idle' }
+        : r);
+      setRounds(updatedRounds);
+      if (idx === rounds.length - 1) setResults(prev => ({ ...prev, [persona.code]: fallback }));
+      saveConversation(activeHistoryId, updatedRounds);
     });
+  }
+
+  async function summarizeRound(roundId) {
+    const idx = rounds.findIndex(r => r.id === roundId);
+    const round = idx >= 0 ? rounds[idx] : null;
+    if (!round || round.summaryStatus === 'loading') return;
+    updateRound(roundId, { summaryStatus: 'loading', summaryError: '' });
+    try {
+      const latestRound = rounds.find(r => r.id === roundId) || round;
+      const summary = await window.LLM.summarizeRound(latestRound, rounds.slice(0, idx), store.data.modelConfig);
+      const updatedRounds = rounds.map(r => r.id === roundId
+        ? { ...r, summary, summaryStatus: 'done', summaryError: '' }
+        : r);
+      setRounds(updatedRounds);
+      saveConversation(activeHistoryId, updatedRounds);
+      toast('本轮总结已生成', 'spark');
+    } catch (err) {
+      updateRound(roundId, { summaryStatus: 'error', summaryError: err.message || '总结失败' });
+      toast(err.message || '总结失败', 'close');
+    }
   }
 
   function onFav(payload) {
@@ -270,11 +460,13 @@ function App() {
                   <h2 className="results__h">
                     {viewingHistory ? '历史回应' : (running ? '人格正在思考…' : '16 种人格的回应')}
                   </h2>
-                  <p className="results__q">「{question}」</p>
+                  <p className="results__q">
+                    {rounds.length > 1 ? `${rounds.length} 轮对话 · 最新问题：「${question}」` : `「${question}」`}
+                  </p>
                 </div>
                 <span className="spacer" />
                 {viewingHistory && (
-                  <button className="btn btn--quiet" onClick={() => { setResults(null); setViewingHistory(null); setQuestion(''); }}>
+                  <button className="btn btn--quiet" onClick={() => { setResults(null); setRounds([]); setViewingHistory(null); setActiveHistoryId(null); setQuestion(''); }}>
                     <Icon name="close" size={16} /><span className="btn__label">退出历史</span>
                   </button>
                 )}
@@ -291,14 +483,25 @@ function App() {
                 </div>
               )}
 
-              <div className="persona-grid" data-view={view} ref={gridRef}>
-                {window.PERSONAS.map((p, i) => (
-                  <div data-flip={p.code} key={p.code}>
-                    <PersonaCard persona={p} state={results[p.code]} view={view}
-                                 index={i} onFav={onFav} isFav={store.isFav} onRetry={retryOne} />
-                  </div>
+              <div className="round-stack">
+                {rounds.map((round, i) => (
+                  <RoundPanel key={round.id} round={round} isLatest={i === rounds.length - 1}
+                              view={view} gridRef={gridRef} onFav={onFav} store={store}
+                              onRetry={retryOne} onSummarize={summarizeRound} running={running} />
                 ))}
               </div>
+              {!running && rounds.length > 0 && !viewingHistory && (
+                <FollowupComposer value={followupDraft}
+                                  onChange={setFollowupDraft}
+                                  running={running}
+                                  onSubmit={e => {
+                                    e.preventDefault();
+                                    const next = followupDraft.trim();
+                                    if (!next) return;
+                                    setFollowupDraft('');
+                                    runAsk(next, { append: true });
+                                  }} />
+              )}
             </section>
           )}
         </main>
