@@ -423,7 +423,8 @@ button { cursor: pointer; }
   .preset-opt:hover,
   .hitem:hover,
   .chip:hover,
-  .presetchip:hover {
+  .presetchip:hover,
+  .round-switch__btn:hover {
     transform: none !important;
     box-shadow: none !important;
   }

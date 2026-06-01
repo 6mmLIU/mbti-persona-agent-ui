@@ -569,22 +569,20 @@ function App() {
               <div className="round-carousel" data-direction={roundDirection}>
                 {rounds.length > 1 && (
                   <aside className="round-switch" aria-label="轮次切换">
-                    <button type="button" className="round-switch__btn"
+                    <button type="button" className="round-switch__btn round-switch__btn--up"
                             onClick={() => showRound(currentRoundIndex - 1)}
                             disabled={currentRoundIndex === 0}
                             aria-label="上一轮">
-                      <Icon name="chevron" size={18} className="ico--left" />
-                      <span>上一轮</span>
+                      <Icon name="chevron" size={26} className="ico--up" />
                     </button>
                     <span className="round-switch__count" aria-live="polite">
-                      {currentRoundIndex + 1}<small>/ {rounds.length}</small>
+                      <b>{currentRoundIndex + 1}</b><small>/ {rounds.length}</small>
                     </span>
-                    <button type="button" className="round-switch__btn"
+                    <button type="button" className="round-switch__btn round-switch__btn--down"
                             onClick={() => showRound(currentRoundIndex + 1)}
                             disabled={currentRoundIndex >= rounds.length - 1}
                             aria-label="下一轮">
-                      <span>下一轮</span>
-                      <Icon name="chevron" size={18} />
+                      <Icon name="chevron" size={26} className="ico--down" />
                     </button>
                   </aside>
                 )}
