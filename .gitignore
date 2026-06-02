@@ -1,3 +1,10 @@
 .DS_Store
 .playwright-cli/
 output/playwright/
+node_modules/
+.env
+.env.*
+dist/
+build/
+coverage/
+npm-debug.log*

@@ -1,5 +1,6 @@
 {
   "name": "mbti-persona-agent-ui",
+  "description": "A local-first MBTI multi-persona ideation workspace with LLM personas and Reddit research mode.",
   "version": "1.0.0",
   "private": true,
   "scripts": {
