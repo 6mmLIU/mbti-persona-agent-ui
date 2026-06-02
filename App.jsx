@@ -210,6 +210,8 @@ function ResearchEvidencePanel({ research, loading, error, compact = false, mode
     : (panelMode === 'custom' ? parseCustomSubreddits(customSubreddits) : RESEARCH_SUBREDDITS);
   const queryVariants = research && Array.isArray(research.queryVariants) ? research.queryVariants : [];
   const discovered = research && Array.isArray(research.discoveredSubreddits) ? research.discoveredSubreddits : [];
+  const strategy = research && research.searchStrategy ? research.searchStrategy : null;
+  const strategyLabel = strategy && strategy.source === 'model' ? '模型策略' : (research && research.lexiconHints ? '词库兜底' : '');
   const heading = loading
     ? '正在抓取 Reddit 数据'
     : (error ? '抓取遇到问题' : (isEmpty ? '等待调研数据' : 'Reddit 真实素材'));
@@ -242,8 +244,11 @@ function ResearchEvidencePanel({ research, loading, error, compact = false, mode
       {!compact && items.length > 0 && (
         <div className="research-meta" aria-label="调研命中路径">
           <span className="tag tag--plain">模式：{modeLabel}</span>
+          {strategyLabel && <span className="tag tag--strategy">{strategyLabel}</span>}
+          {strategy && strategy.audience && <span className="tag tag--plain">{strategy.audience}</span>}
+          {strategy && strategy.domain && <span className="tag tag--plain">{strategy.domain}</span>}
           {targetSubreddits.slice(0, 8).map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
-          {queryVariants.slice(0, 3).map(q => <span className="tag tag--query" key={q}>{q}</span>)}
+          {queryVariants.slice(0, 5).map(q => <span className="tag tag--query" key={q}>{q}</span>)}
           {discovered.slice(0, 4).map(item => (
             <span className="tag tag--plain" key={`d-${item.subreddit}`}>发现 r/{item.subreddit}</span>
           ))}
@@ -602,6 +607,14 @@ function App() {
     setResearchLoading(true);
     setResearchError('');
     try {
+      let strategy = null;
+      if (window.LLM && window.LLM.isConfigured && window.LLM.isConfigured(store.data.modelConfig) && window.LLM.generateResearchStrategy) {
+        try {
+          strategy = await window.LLM.generateResearchStrategy(q, store.activePresetObj, store.data.modelConfig, mode, customTargets);
+        } catch (err) {
+          toast('模型检索策略生成失败，已使用词库兜底', 'close');
+        }
+      }
       const resp = await fetch('/api/reddit-research', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -609,6 +622,7 @@ function App() {
           query: q,
           mode,
           subreddits: mode === 'custom' ? customTargets : RESEARCH_SUBREDDITS,
+          strategy,
           timeWindow: 'month',
           limit: 12,
         }),

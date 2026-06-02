@@ -245,6 +245,11 @@ button { cursor: pointer; }
   color: var(--sky-ink);
   border-color: color-mix(in srgb, var(--sky) 24%, transparent);
 }
+.tag--strategy {
+  background: color-mix(in srgb, var(--good) 12%, var(--surface));
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 28%, transparent);
+}
 
 .card {
   background: var(--surface);

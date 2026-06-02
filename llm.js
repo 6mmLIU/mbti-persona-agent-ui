@@ -675,6 +675,87 @@ personaNotes 必须覆盖 16 个代码，每个 takeaway 都要完整收句，�
     return cannedSummary(round);
   }
 
+  function buildResearchStrategyPrompt(question, preset, mode, customSubreddits) {
+    const custom = Array.isArray(customSubreddits) && customSubreddits.length
+      ? customSubreddits.map(s => `r/${s}`).join(' / ')
+      : '无';
+    return `你是一个专业的 Reddit 数据调研检索策略师。
+用户会用中文提出调研问题，但 Reddit 主要是英文语料。你的任务不是回答问题，而是把问题转换成更容易抓到真实 Reddit 帖子的英文检索策略。
+
+用户问题：
+「${question}」
+
+当前调研模式：${mode || 'focused'}
+自定义社区：${custom}
+${presetBlock(preset)}
+
+请严格只输出一个 JSON 对象，不要 Markdown，不要解释。结构如下：
+{
+  "audience": "目标人群，英文短语",
+  "domain": "问题领域，英文短语",
+  "problem": "核心痛点，英文短语",
+  "englishQueries": ["5-8 个 Reddit 搜索 query，每个 3-7 个英文词，像真实 Reddit 用户会写的表达"],
+  "subreddits": ["4-8 个可能相关的 subreddit 名，不带 r/，只用英文数字下划线"],
+  "keywords": ["8-12 个英文关键词或短语"],
+  "rationale": "中文说明，≤80字，说明为什么这样搜"
+}
+
+要求：
+- englishQueries 必须覆盖目标人群、痛点、工具/行业、付费/抱怨/求助等不同搜索角度。
+- 不要把中文直译成生硬英文，要换成 Reddit 常见说法。
+- subreddits 要优先选择真实存在概率高、和人群/场景直接相关的社区；不确定时使用更通用的社区。
+- 如果是 custom 模式，subreddits 仍可给建议，但不要替代用户自定义社区。
+- 全部 query 和 subreddit 都必须可直接用于 Reddit 搜索。`;
+  }
+
+  function normalizeResearchStrategy(obj) {
+    const arr = v => Array.isArray(v) ? v.filter(Boolean).map(x => String(x).trim()).filter(Boolean) : [];
+    const cleanSub = value => String(value || '').replace(/^r\//i, '').trim().replace(/[^A-Za-z0-9_]/g, '');
+    const dedupe = values => {
+      const seen = new Set();
+      return values.filter(value => {
+        const key = String(value || '').toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+    const englishQueries = dedupe(arr(obj && obj.englishQueries)
+      .map(q => q.replace(/\s+/g, ' ').slice(0, 90)))
+      .slice(0, 8);
+    const subreddits = dedupe(arr(obj && obj.subreddits).map(cleanSub).filter(s => /^[A-Za-z0-9_]{2,32}$/.test(s))).slice(0, 8);
+    const keywords = dedupe(arr(obj && obj.keywords).map(k => k.replace(/\s+/g, ' ').slice(0, 48))).slice(0, 12);
+    if (!englishQueries.length && !subreddits.length && !keywords.length) return null;
+    return {
+      source: 'model',
+      audience: obj && obj.audience ? String(obj.audience).slice(0, 80) : '',
+      domain: obj && obj.domain ? String(obj.domain).slice(0, 80) : '',
+      problem: obj && obj.problem ? String(obj.problem).slice(0, 120) : '',
+      englishQueries,
+      subreddits,
+      keywords,
+      rationale: obj && obj.rationale ? String(obj.rationale).slice(0, 160) : '',
+    };
+  }
+
+  async function generateResearchStrategy(question, preset, modelConfig, mode, customSubreddits) {
+    if (!isConfigured(modelConfig)) return null;
+    const cfg = effectiveConfig(modelConfig);
+    const strategyCfg = {
+      ...cfg,
+      temperature: Math.min(Number(cfg.temperature) || 0.4, 0.4),
+      maxTokens: Math.max(900, Math.min(Number(cfg.maxTokens) || 1200, 1800)),
+    };
+    const text = await requestPromptText(
+      buildResearchStrategyPrompt(question, preset, mode, customSubreddits),
+      strategyCfg
+    );
+    const parsed = extractJSON(text);
+    const strategy = normalizeResearchStrategy(parsed);
+    if (!strategy) throw new Error('模型没有返回可用检索策略');
+    return strategy;
+  }
+
   async function testConfig(config) {
     const persona = window.PERSONAS && window.PERSONAS[0];
     if (!persona) throw new Error('缺少人格数据');
@@ -769,6 +850,7 @@ personaNotes 必须覆盖 16 个代码，每个 takeaway 都要完整收句，�
     describeConfig,
     effectiveConfig,
     testConfig,
+    generateResearchStrategy,
     summarizeRound,
     askPersona,
     askAll,

@@ -8,6 +8,78 @@ const maxBodyBytes = 2 * 1024 * 1024;
 const redditUserAgent = 'mbti-persona-research/1.0 (local development)';
 const defaultResearchSubreddits = ['SideProject', 'startups', 'Entrepreneur', 'SaaS', 'indiehackers'];
 const validResearchModes = new Set(['focused', 'global', 'custom']);
+const researchLexicon = [
+  {
+    triggers: ['独立开发', '个人开发', '一个人', '副业', 'side project', 'indie'],
+    queries: ['indie hacker pain points', 'solo founder first customers', 'side project validation', 'build in public feedback'],
+    subreddits: ['SideProject', 'indiehackers', 'buildinpublic', 'EntrepreneurRideAlong', 'micro_saas'],
+  },
+  {
+    triggers: ['老师', '教师', '备课', '课堂', '作业', '批改', '教育'],
+    queries: ['teacher lesson planning workload', 'teachers grading burnout', 'classroom management tools', 'teacher admin tasks AI'],
+    subreddits: ['Teachers', 'teaching', 'education', 'edtech'],
+  },
+  {
+    triggers: ['房产', '中介', '房地产', '租房', '经纪人', '客户跟进'],
+    queries: ['real estate agent client follow up', 'realtor lead management pain points', 'real estate CRM problems', 'property manager automation'],
+    subreddits: ['realestate', 'realtors', 'PropertyManagement', 'RealEstateTechnology'],
+  },
+  {
+    triggers: ['adhd', '注意力', '拖延', '专注', '效率工具'],
+    queries: ['ADHD productivity app frustration', 'ADHD task management tools', 'ADHD reminders executive function', 'productivity tools pain points'],
+    subreddits: ['ADHD', 'productivity', 'getdisciplined', 'Notion'],
+  },
+  {
+    triggers: ['小企业', '小商家', '老板', '门店', '生意', '自动化'],
+    queries: ['small business automation pain points', 'small business owner overwhelmed', 'business operations manual tasks', 'local business software problems'],
+    subreddits: ['smallbusiness', 'Entrepreneur', 'business', 'SaaS'],
+  },
+  {
+    triggers: ['自由职业', '接单', 'freelance', '客户报价', '发票'],
+    queries: ['freelancer client management problems', 'freelance invoicing pain points', 'freelancer proposal workflow', 'freelance admin tasks'],
+    subreddits: ['freelance', 'freelancers', 'Upwork', 'smallbusiness'],
+  },
+  {
+    triggers: ['电商', '亚马逊', 'shopify', '网店', '跨境', '卖家'],
+    queries: ['Shopify merchant pain points', 'ecommerce seller automation', 'Amazon seller workflow problems', 'online store customer support issues'],
+    subreddits: ['shopify', 'ecommerce', 'AmazonSeller', 'Entrepreneur'],
+  },
+  {
+    triggers: ['客服', '客户支持', '工单', '售后', '用户反馈'],
+    queries: ['customer support ticket pain points', 'helpdesk workflow problems', 'customer feedback management tools', 'support automation complaints'],
+    subreddits: ['CustomerSuccess', 'SaaS', 'smallbusiness', 'Entrepreneur'],
+  },
+  {
+    triggers: ['获客', '销售', '线索', '营销', '增长', '转化'],
+    queries: ['startup customer acquisition pain points', 'sales lead follow up problems', 'marketing automation pain points', 'founder first customers'],
+    subreddits: ['sales', 'marketing', 'startups', 'Entrepreneur'],
+  },
+  {
+    triggers: ['健身', '教练', '瑜伽', '训练', '私教'],
+    queries: ['personal trainer client management', 'fitness coach scheduling problems', 'gym owner software pain points', 'fitness habit tracking app'],
+    subreddits: ['personaltraining', 'fitness', 'gymowners', 'smallbusiness'],
+  },
+  {
+    triggers: ['心理', '咨询', '治疗师', '心理健康', 'therapy'],
+    queries: ['therapist private practice admin', 'mental health app pain points', 'therapy client notes scheduling', 'private practice software problems'],
+    subreddits: ['therapists', 'psychotherapy', 'mentalhealth', 'smallbusiness'],
+  },
+  {
+    triggers: ['写作', '内容创作', '公众号', '自媒体', '创作者', '短视频'],
+    queries: ['creator workflow pain points', 'content creator planning tools', 'newsletter creator monetization', 'short form video workflow'],
+    subreddits: ['content_marketing', 'NewTubers', 'CreatorEconomy', 'newsletter'],
+  },
+  {
+    triggers: ['餐厅', '咖啡', '奶茶', '外卖', '餐饮'],
+    queries: ['restaurant owner operations problems', 'cafe owner scheduling inventory', 'food business automation pain points', 'restaurant customer retention'],
+    subreddits: ['restaurantowners', 'smallbusiness', 'barista', 'Entrepreneur'],
+  },
+  {
+    triggers: ['宠物', '宠物店', '兽医', '猫', '狗'],
+    queries: ['pet business owner pain points', 'veterinary clinic scheduling problems', 'pet store inventory customer management', 'pet services automation'],
+    subreddits: ['pets', 'VetTech', 'smallbusiness', 'Entrepreneur'],
+  },
+];
 
 const mime = {
   '.html': 'text/html; charset=utf-8',
@@ -80,6 +152,7 @@ function cleanQuery(value) {
 
 function cleanSubreddit(value) {
   const s = String(value || '').replace(/^r\//i, '').trim();
+  if (/^u_/i.test(s)) return '';
   return /^[A-Za-z0-9_]{2,32}$/.test(s) ? s : '';
 }
 
@@ -107,13 +180,40 @@ function includesAny(value, words) {
   return words.some(word => text.includes(String(word).toLowerCase()));
 }
 
-function buildQueryVariants(query) {
+function cleanResearchStrategy(value) {
+  if (!value || typeof value !== 'object') return null;
+  const arr = v => Array.isArray(v) ? v.filter(Boolean).map(String) : [];
+  const strategy = {
+    source: value.source === 'model' ? 'model' : 'manual',
+    audience: String(value.audience || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+    domain: String(value.domain || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+    problem: String(value.problem || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+    rationale: String(value.rationale || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+    englishQueries: uniqueStrings(arr(value.englishQueries).map(cleanQuery).filter(Boolean)).slice(0, 8),
+    subreddits: uniqueStrings(arr(value.subreddits).map(cleanSubreddit).filter(Boolean)).slice(0, 8),
+    keywords: uniqueStrings(arr(value.keywords).map(cleanQuery).filter(Boolean)).slice(0, 12),
+  };
+  return strategy.englishQueries.length || strategy.subreddits.length || strategy.keywords.length ? strategy : null;
+}
+
+function lexiconHintsFor(query) {
+  const matched = researchLexicon.filter(entry => includesAny(query, entry.triggers));
+  return {
+    queries: uniqueStrings(matched.flatMap(entry => entry.queries || [])).slice(0, 10),
+    subreddits: uniqueStrings(matched.flatMap(entry => entry.subreddits || []).map(cleanSubreddit).filter(Boolean)).slice(0, 10),
+  };
+}
+
+function buildQueryVariants(query, strategy) {
   const base = cleanQuery(query);
   const variants = [];
   const add = value => {
     const cleaned = cleanQuery(value);
     if (cleaned) variants.push(cleaned);
   };
+
+  if (strategy && Array.isArray(strategy.englishQueries)) strategy.englishQueries.forEach(add);
+  lexiconHintsFor(base).queries.forEach(add);
 
   const cjk = hasCJK(base);
   if (!cjk) add(base);
@@ -158,7 +258,7 @@ function buildQueryVariants(query) {
   }
   if (cjk) add(base);
 
-  return uniqueStrings(variants).slice(0, 5);
+  return uniqueStrings(variants).slice(0, 8);
 }
 
 function inferSubredditFromUrl(url) {
@@ -323,7 +423,7 @@ function dedupeItems(items) {
 }
 
 function onlyPostItems(items) {
-  return items.filter(item => item && (item.kind === 'post' || isRedditPostUrl(item.url)));
+  return items.filter(item => item && cleanSubreddit(item.subreddit) && (item.kind === 'post' || isRedditPostUrl(item.url)));
 }
 
 function scoreDiscoveredSubreddits(items) {
@@ -424,7 +524,9 @@ async function handleRedditResearch(req, res) {
       ? payload.timeWindow
       : 'month';
     const mode = normalizeResearchMode(payload.mode);
-    const queryVariants = buildQueryVariants(query);
+    const strategy = cleanResearchStrategy(payload.strategy);
+    const lexiconHints = lexiconHintsFor(query);
+    const queryVariants = buildQueryVariants(query, strategy);
     const subreddits = Array.isArray(payload.subreddits)
       ? payload.subreddits.map(cleanSubreddit).filter(Boolean).slice(0, 8)
       : [];
@@ -441,13 +543,16 @@ async function handleRedditResearch(req, res) {
       discoveryItems = discovery.items;
       discoveredSubreddits = discovery.discovered;
       discoveryErrors = discovery.errors;
-      targets = discoveredSubreddits.length
-        ? discoveredSubreddits.map(item => item.subreddit).slice(0, 8)
-        : defaultResearchSubreddits;
+      targets = uniqueStrings([
+        ...(strategy ? strategy.subreddits : []),
+        ...lexiconHints.subreddits,
+        ...discoveredSubreddits.map(item => item.subreddit),
+        ...defaultResearchSubreddits,
+      ]).slice(0, 8);
     }
 
     const rss = await fetchTargetedRedditItems(targets, queryVariants, timeWindow);
-    let items = onlyPostItems(dedupeItems(mode === 'global' ? [...discoveryItems, ...rss.items] : rss.items));
+    let items = onlyPostItems(dedupeItems(mode === 'global' ? [...rss.items, ...discoveryItems] : rss.items));
     let fallbackUsed = false;
     let archiveErrors = [];
     if (items.length < Math.min(4, limit)) {
@@ -471,6 +576,8 @@ async function handleRedditResearch(req, res) {
         mode,
         subreddits: targets,
         discoveredSubreddits,
+        searchStrategy: strategy,
+        lexiconHints,
       });
       return true;
     }
@@ -483,6 +590,8 @@ async function handleRedditResearch(req, res) {
       mode,
       subreddits: targets,
       discoveredSubreddits,
+      searchStrategy: strategy,
+      lexiconHints,
       timeWindow,
       fetchedAt: new Date().toISOString(),
       total: items.length,
