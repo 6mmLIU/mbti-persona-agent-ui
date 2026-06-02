@@ -16,6 +16,46 @@ const RESEARCH_EXAMPLE_QS = [
 ];
 
 const RESEARCH_SUBREDDITS = ['SideProject', 'startups', 'Entrepreneur', 'SaaS', 'indiehackers'];
+const RESEARCH_MODE_OPTIONS = [
+  {
+    id: 'focused',
+    label: '精准模式',
+    shortLabel: '精准',
+    description: '只查独立开发者、创业和 SaaS 社区，速度最快，适合当前这个独立开发者主题。',
+  },
+  {
+    id: 'global',
+    label: '全局发现',
+    shortLabel: '全局',
+    description: '先全 Reddit 搜索并发现相关社区，再进入高相关社区深挖，覆盖面更可靠。',
+  },
+  {
+    id: 'custom',
+    label: '自定义',
+    shortLabel: '自定义',
+    description: '手动输入 subreddit，适合某个明确人群或行业，例如 smallbusiness、freelance、teachers。',
+  },
+];
+const RESEARCH_MODE_LABELS = RESEARCH_MODE_OPTIONS.reduce((acc, item) => ({ ...acc, [item.id]: item.label }), {});
+
+function parseCustomSubreddits(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(/[,\s，、/]+/)
+    .map(x => x.replace(/^r\//i, '').trim())
+    .filter(x => /^[A-Za-z0-9_]{2,32}$/.test(x))
+    .filter(x => {
+      const key = x.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 8);
+}
+
+function researchModeMeta(mode) {
+  return RESEARCH_MODE_OPTIONS.find(item => item.id === mode) || RESEARCH_MODE_OPTIONS[0];
+}
 
 function PersonaPreview({ personas, presetName }) {
   return (
@@ -160,9 +200,19 @@ function formatSourceDate(value) {
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
 }
 
-function ResearchEvidencePanel({ research, loading, error, compact = false }) {
+function ResearchEvidencePanel({ research, loading, error, compact = false, mode = 'focused', customSubreddits = '' }) {
   const items = research && Array.isArray(research.items) ? research.items : [];
   const isEmpty = !loading && !error && !items.length;
+  const panelMode = (research && research.mode) || mode || 'focused';
+  const modeLabel = RESEARCH_MODE_LABELS[panelMode] || '调研模式';
+  const targetSubreddits = research && Array.isArray(research.subreddits) && research.subreddits.length
+    ? research.subreddits
+    : (panelMode === 'custom' ? parseCustomSubreddits(customSubreddits) : RESEARCH_SUBREDDITS);
+  const queryVariants = research && Array.isArray(research.queryVariants) ? research.queryVariants : [];
+  const discovered = research && Array.isArray(research.discoveredSubreddits) ? research.discoveredSubreddits : [];
+  const heading = loading
+    ? '正在抓取 Reddit 数据'
+    : (error ? '抓取遇到问题' : (isEmpty ? '等待调研数据' : 'Reddit 真实素材'));
   if (isEmpty && compact) return null;
   return (
     <section className={'research-evidence' + (compact ? ' research-evidence--compact' : '')}
@@ -170,21 +220,33 @@ function ResearchEvidencePanel({ research, loading, error, compact = false }) {
       <div className="research-evidence__head">
         <span className="research-evidence__mark"><Icon name="database" size={17} /></span>
         <div>
-          <h3>{loading ? '正在抓取 Reddit 数据' : (isEmpty ? '等待调研数据' : 'Reddit 真实素材')}</h3>
+          <h3>{heading}</h3>
           <p>
             {loading
-              ? '正在搜索相关帖子，完成后会把这些素材注入 16 个人格的思考上下文。'
+              ? `${modeLabel}正在搜索相关帖子，完成后会把这些素材注入 16 个人格的思考上下文。`
               : error
                 ? error
                 : isEmpty
-                  ? '输入议题后，会从这些社区抓取真实帖子，再交给 16 种人格继续分析。'
-                  : `检索「${research.query}」，抓到 ${items.length} 条帖子 · ${research.source || 'reddit-rss'}`}
+                  ? `${modeLabel}会先抓取真实帖子，再交给 16 种人格继续分析。`
+                  : `${modeLabel}检索「${research.query}」，抓到 ${items.length} 条帖子 · ${research.source || 'reddit-rss'}`}
           </p>
         </div>
       </div>
-      {isEmpty && (
-        <div className="research-empty" aria-label="默认 Reddit 社区">
-          {RESEARCH_SUBREDDITS.map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
+      {!compact && (isEmpty || error) && (
+        <div className="research-empty" aria-label="当前 Reddit 社区">
+          {panelMode === 'global'
+            ? <span className="tag tag--plain">全 Reddit 自动发现</span>
+            : targetSubreddits.map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
+        </div>
+      )}
+      {!compact && items.length > 0 && (
+        <div className="research-meta" aria-label="调研命中路径">
+          <span className="tag tag--plain">模式：{modeLabel}</span>
+          {targetSubreddits.slice(0, 8).map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
+          {queryVariants.slice(0, 3).map(q => <span className="tag tag--query" key={q}>{q}</span>)}
+          {discovered.slice(0, 4).map(item => (
+            <span className="tag tag--plain" key={`d-${item.subreddit}`}>发现 r/{item.subreddit}</span>
+          ))}
         </div>
       )}
       {items.length > 0 && (
@@ -282,7 +344,41 @@ function FollowupComposer({ value, onChange, onSubmit, running, viewingHistory }
   );
 }
 
-function ResearchRoute({ value, onChange, onSubmit, onFetchOnly, loading, running, research, error, presetName, modelLabel }) {
+function ResearchModeControl({ mode, onModeChange, customSubreddits, onCustomSubredditsChange }) {
+  const meta = researchModeMeta(mode);
+  const parsed = parseCustomSubreddits(customSubreddits);
+  return (
+    <div className="research-mode">
+      <div className="segmented research-mode__seg" role="group" aria-label="Reddit 调研模式">
+        {RESEARCH_MODE_OPTIONS.map(item => (
+          <button key={item.id} type="button"
+                  aria-pressed={mode === item.id}
+                  onClick={() => onModeChange(item.id)}>
+            {item.shortLabel}
+          </button>
+        ))}
+      </div>
+      <p>{meta.description}</p>
+      {mode === 'custom' && (
+        <label className="research-custom">
+          <span className="pcard__label">自定义 subreddit</span>
+          <input value={customSubreddits}
+                 onChange={e => onCustomSubredditsChange(e.target.value)}
+                 placeholder="smallbusiness, freelance, teachers, ADHD, realestate"
+                 aria-label="输入自定义 subreddit" />
+          <small>{parsed.length ? `将搜索 ${parsed.length} 个社区` : '用英文逗号或空格分隔，最多 8 个。'}</small>
+        </label>
+      )}
+    </div>
+  );
+}
+
+function ResearchRoute({
+  value, onChange, onSubmit, onFetchOnly, loading, running, research, error,
+  presetName, modelLabel, researchMode, setResearchMode, customSubreddits, setCustomSubreddits,
+}) {
+  const customMissing = researchMode === 'custom' && !parseCustomSubreddits(customSubreddits).length;
+  const actionDisabled = !value.trim() || loading || running || customMissing;
   return (
       <section className="container research-hero" aria-labelledby="research-title">
         <div className="research-hero__copy">
@@ -297,16 +393,20 @@ function ResearchRoute({ value, onChange, onSubmit, onFetchOnly, loading, runnin
                       aria-label="输入调研议题"
                       placeholder="输入一个需要调研的议题，例如：独立开发者如何用 AI 赚到第一份可见收入？"
                       onChange={e => onChange(e.target.value)} />
+            <ResearchModeControl mode={researchMode}
+                                 onModeChange={setResearchMode}
+                                 customSubreddits={customSubreddits}
+                                 onCustomSubredditsChange={setCustomSubreddits} />
             <div className="research-ask__actions">
               <button className="btn btn--ghost" type="button"
-                      disabled={!value.trim() || loading || running}
+                      disabled={actionDisabled}
                       data-loading={loading ? 'true' : 'false'}
                       onClick={onFetchOnly}>
                 {loading && <span className="btn__spin" />}
                 <Icon name="database" size={17} /><span className="btn__label">只抓数据</span>
               </button>
               <button className="btn btn--primary" type="submit"
-                      disabled={!value.trim() || loading || running}
+                      disabled={actionDisabled}
                       data-loading={(loading || running) ? 'true' : 'false'}>
                 {(loading || running) && <span className="btn__spin" />}
                 <Icon name="send" size={17} /><span className="btn__label">抓取并思考</span>
@@ -314,7 +414,14 @@ function ResearchRoute({ value, onChange, onSubmit, onFetchOnly, loading, runnin
             </div>
           </form>
           <div className="research-subs" aria-label="默认调研社区">
-            {RESEARCH_SUBREDDITS.map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)}
+            {researchMode === 'global'
+              ? <span className="tag tag--plain">全 Reddit 自动发现相关社区</span>
+              : (researchMode === 'custom'
+                ? parseCustomSubreddits(customSubreddits).map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>)
+                : RESEARCH_SUBREDDITS.map(sub => <span className="tag tag--plain" key={sub}>r/{sub}</span>))}
+            {researchMode === 'custom' && !parseCustomSubreddits(customSubreddits).length && (
+              <span className="tag tag--plain">等待输入社区</span>
+            )}
           </div>
           <div className="chips" role="list" aria-label="调研示例">
             {RESEARCH_EXAMPLE_QS.map((q, i) => (
@@ -324,7 +431,8 @@ function ResearchRoute({ value, onChange, onSubmit, onFetchOnly, loading, runnin
             ))}
           </div>
         </div>
-        <ResearchEvidencePanel research={research} loading={loading} error={error} />
+        <ResearchEvidencePanel research={research} loading={loading} error={error}
+                               mode={researchMode} customSubreddits={customSubreddits} />
       </section>
   );
 }
@@ -426,6 +534,8 @@ function App() {
   const [showPresets, setShowPresets] = useState(false);
   const [draft, setDraft] = useState('');
   const [researchDraft, setResearchDraft] = useState('');
+  const [researchMode, setResearchMode] = useState('focused');
+  const [customSubreddits, setCustomSubreddits] = useState('');
   const [researchData, setResearchData] = useState(null);
   const [researchLoading, setResearchLoading] = useState(false);
   const [researchError, setResearchError] = useState('');
@@ -481,6 +591,14 @@ function App() {
   async function fetchResearch(qRaw) {
     const q = (qRaw || researchDraft).trim();
     if (!q) return null;
+    const mode = researchMode;
+    const customTargets = parseCustomSubreddits(customSubreddits);
+    if (mode === 'custom' && !customTargets.length) {
+      const msg = '自定义模式至少需要输入 1 个 subreddit';
+      setResearchError(msg);
+      toast(msg, 'close');
+      return null;
+    }
     setResearchLoading(true);
     setResearchError('');
     try {
@@ -489,7 +607,8 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: q,
-          subreddits: RESEARCH_SUBREDDITS,
+          mode,
+          subreddits: mode === 'custom' ? customTargets : RESEARCH_SUBREDDITS,
           timeWindow: 'month',
           limit: 12,
         }),
@@ -601,6 +720,10 @@ function App() {
     setViewingHistory(h);
     setActiveHistoryId(h.id);
     setResearchData(last.research || h.research || null);
+    if (last.research && last.research.mode) setResearchMode(last.research.mode);
+    if (last.research && last.research.mode === 'custom' && Array.isArray(last.research.subreddits)) {
+      setCustomSubreddits(last.research.subreddits.join(', '));
+    }
     setResearchDraft(last.question || h.latestQuestion || h.question || '');
     setResearchError('');
     setRoute(last.mode === 'research' || h.mode === 'research' ? 'research' : 'home');
@@ -839,6 +962,10 @@ function App() {
             error={researchError}
             presetName={preset ? preset.name : '无'}
             modelLabel={store.modelLabel}
+            researchMode={researchMode}
+            setResearchMode={setResearchMode}
+            customSubreddits={customSubreddits}
+            setCustomSubreddits={setCustomSubreddits}
           />
           <div id="results-anchor" />
           {results && isResearchRound && (

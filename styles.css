@@ -240,6 +240,11 @@ button { cursor: pointer; }
   white-space: nowrap;
 }
 .tag--plain { background: var(--surface-2); color: var(--text-2); }
+.tag--query {
+  background: var(--sky-tint);
+  color: var(--sky-ink);
+  border-color: color-mix(in srgb, var(--sky) 24%, transparent);
+}
 
 .card {
   background: var(--surface);

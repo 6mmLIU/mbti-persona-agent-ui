@@ -7,6 +7,7 @@ const port = Number(process.env.PORT || 4174);
 const maxBodyBytes = 2 * 1024 * 1024;
 const redditUserAgent = 'mbti-persona-research/1.0 (local development)';
 const defaultResearchSubreddits = ['SideProject', 'startups', 'Entrepreneur', 'SaaS', 'indiehackers'];
+const validResearchModes = new Set(['focused', 'global', 'custom']);
 
 const mime = {
   '.html': 'text/html; charset=utf-8',
@@ -82,6 +83,93 @@ function cleanSubreddit(value) {
   return /^[A-Za-z0-9_]{2,32}$/.test(s) ? s : '';
 }
 
+function uniqueStrings(values) {
+  const seen = new Set();
+  return values.filter(value => {
+    const key = String(value || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeResearchMode(value) {
+  const mode = String(value || 'focused').toLowerCase();
+  return validResearchModes.has(mode) ? mode : 'focused';
+}
+
+function hasCJK(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ''));
+}
+
+function includesAny(value, words) {
+  const text = String(value || '').toLowerCase();
+  return words.some(word => text.includes(String(word).toLowerCase()));
+}
+
+function buildQueryVariants(query) {
+  const base = cleanQuery(query);
+  const variants = [];
+  const add = value => {
+    const cleaned = cleanQuery(value);
+    if (cleaned) variants.push(cleaned);
+  };
+
+  const cjk = hasCJK(base);
+  if (!cjk) add(base);
+
+  const independent = includesAny(base, ['独立开发', '独立开发者', '个人开发', '一个人', 'solo', 'indie', 'side project']);
+  const ai = includesAny(base, ['ai', '人工智能', '大模型', 'llm', 'chatgpt']);
+  const revenue = includesAny(base, ['赚钱', '收入', '可见收入', '第一份', '变现', '收费', '付费', 'revenue', 'make money']);
+  const saas = includesAny(base, ['saas', '小产品', 'micro saas', '软件']);
+  const pain = includesAny(base, ['痛点', '抱怨', '吐槽', '问题', '效率工具', 'productivity']);
+  const validate = includesAny(base, ['验证', 'mvp', '实验', '快速', 'validate']);
+  const customer = includesAny(base, ['获客', '用户', '客户', '增长', 'acquisition']);
+  const business = includesAny(base, ['创业', '生意', 'startup', 'business']);
+
+  if (independent && ai && revenue) {
+    add('indie hacker AI first revenue');
+    add('solo founder AI make money');
+    add('AI side project paying users');
+    add('micro SaaS AI revenue');
+  }
+  if (pain) {
+    add('productivity tools pain points');
+    add('productivity app complaints');
+    add('workflow tool frustration');
+  }
+  if (saas || validate) {
+    add('solo founder micro SaaS validation');
+    add('one person SaaS ideas');
+    add('indie hacker SaaS first customers');
+  }
+  if (customer) {
+    add('startup customer acquisition pain points');
+    add('indie hacker first customers');
+  }
+  if (business && ai && !revenue) {
+    add('AI startup ideas solo founder');
+    add('AI business ideas indie hacker');
+  }
+  if (cjk && !variants.length) {
+    add('indie hacker startup idea');
+    add('solo founder SaaS pain points');
+    add('AI side project validation');
+  }
+  if (cjk) add(base);
+
+  return uniqueStrings(variants).slice(0, 5);
+}
+
+function inferSubredditFromUrl(url) {
+  const match = String(url || '').match(/\/r\/([^/]+)\//i);
+  return match ? cleanSubreddit(match[1]) : '';
+}
+
+function isRedditPostUrl(url) {
+  return /\/comments\//i.test(String(url || ''));
+}
+
 function decodeEntities(value) {
   const named = {
     amp: '&',
@@ -133,17 +221,19 @@ function parseRedditRSS(xml, subreddit, source) {
     const author = textFromXML(entry, 'name').replace(/^\/u\//i, '');
     const publishedAt = textFromXML(entry, 'published') || textFromXML(entry, 'updated');
     if (!title || !url) return null;
+    const itemSubreddit = cleanSubreddit(subreddit) || inferSubredditFromUrl(url) || 'reddit';
     return {
-      id: textFromXML(entry, 'id') || `${subreddit}-${index}`,
+      id: textFromXML(entry, 'id') || `${itemSubreddit}-${index}`,
       title,
       excerpt: content,
-      subreddit,
+      subreddit: itemSubreddit,
       author,
       publishedAt,
       url,
       score: null,
       comments: null,
       source,
+      kind: isRedditPostUrl(url) ? 'post' : 'community',
     };
   }).filter(Boolean);
 }
@@ -161,6 +251,7 @@ function normalizeArchivePost(post, subreddit) {
     score: Number.isFinite(Number(post.score)) ? Number(post.score) : null,
     comments: Number.isFinite(Number(post.num_comments)) ? Number(post.num_comments) : null,
     source: 'pullpush-reddit-archive',
+    kind: 'post',
   };
 }
 
@@ -198,10 +289,19 @@ async function fetchRedditRSS(subreddit, query, timeWindow) {
   return parseRedditRSS(xml, subreddit, 'reddit-rss');
 }
 
+async function fetchGlobalRedditRSS(query, timeWindow) {
+  const url = new URL('https://www.reddit.com/search.rss');
+  url.searchParams.set('q', query);
+  url.searchParams.set('sort', 'relevance');
+  url.searchParams.set('t', timeWindow || 'month');
+  const xml = await fetchText(url, 12000);
+  return parseRedditRSS(xml, '', 'reddit-global-rss');
+}
+
 async function fetchPullPush(subreddit, query, size) {
   const url = new URL('https://api.pullpush.io/reddit/search/submission/');
   url.searchParams.set('q', query);
-  url.searchParams.set('subreddit', subreddit);
+  if (subreddit) url.searchParams.set('subreddit', subreddit);
   url.searchParams.set('size', String(size));
   url.searchParams.set('sort', 'desc');
   url.searchParams.set('sort_type', 'score');
@@ -220,6 +320,88 @@ function dedupeItems(items) {
     seen.add(key);
     return true;
   });
+}
+
+function onlyPostItems(items) {
+  return items.filter(item => item && (item.kind === 'post' || isRedditPostUrl(item.url)));
+}
+
+function scoreDiscoveredSubreddits(items) {
+  const counts = new Map();
+  items.forEach(item => {
+    const sub = cleanSubreddit(item && item.subreddit);
+    if (!sub || sub.toLowerCase() === 'reddit') return;
+    const current = counts.get(sub) || { subreddit: sub, count: 0, score: 0 };
+    current.count += 1;
+    current.score += 1;
+    if (defaultResearchSubreddits.some(x => x.toLowerCase() === sub.toLowerCase())) current.score += 0.75;
+    if (item && Number.isFinite(Number(item.comments))) current.score += Math.min(Number(item.comments) / 80, 1.5);
+    if (item && Number.isFinite(Number(item.score))) current.score += Math.min(Number(item.score) / 200, 1.5);
+    counts.set(sub, current);
+  });
+  return Array.from(counts.values()).sort((a, b) => b.score - a.score || b.count - a.count);
+}
+
+async function runTaskBatch(tasks) {
+  const settled = await Promise.allSettled(tasks.map(task => task.run()));
+  const items = [];
+  const errors = [];
+  settled.forEach((result, index) => {
+    const task = tasks[index];
+    if (result.status === 'fulfilled') {
+      result.value.forEach(item => items.push({ ...item, matchedQuery: task.query }));
+    } else {
+      const message = result.reason && result.reason.message ? result.reason.message : '抓取失败';
+      errors.push(`${task.label}: ${message}`);
+    }
+  });
+  return { items, errors };
+}
+
+async function discoverRedditCommunities(queryVariants, timeWindow) {
+  const variants = queryVariants.slice(0, 3);
+  const rssTasks = variants.map(query => ({
+    label: `global:${query}`,
+    query,
+    run: () => fetchGlobalRedditRSS(query, timeWindow),
+  }));
+  const rss = await runTaskBatch(rssTasks);
+  let items = dedupeItems(rss.items);
+  let errors = rss.errors;
+
+  if (items.length < 6) {
+    const archiveTasks = variants.slice(0, 2).map(query => ({
+      label: `global-archive:${query}`,
+      query,
+      run: () => fetchPullPush('', query, 12),
+    }));
+    const archive = await runTaskBatch(archiveTasks);
+    items = dedupeItems([...items, ...archive.items]);
+    errors = [...errors, ...archive.errors];
+  }
+
+  const discovered = scoreDiscoveredSubreddits(items).slice(0, 8);
+  return { items, discovered, errors };
+}
+
+async function fetchTargetedRedditItems(targets, queryVariants, timeWindow) {
+  const variants = queryVariants.slice(0, 3);
+  const rssTasks = targets.flatMap(subreddit => variants.map(query => ({
+    label: `${subreddit}:${query}`,
+    query,
+    run: () => fetchRedditRSS(subreddit, query, timeWindow),
+  })));
+  return runTaskBatch(rssTasks);
+}
+
+async function fetchArchiveRedditItems(targets, queryVariants) {
+  const variants = queryVariants.slice(0, 2);
+  const archiveTasks = targets.flatMap(subreddit => variants.map(query => ({
+    label: `${subreddit}:archive:${query}`,
+    query,
+    run: () => fetchPullPush(subreddit, query, 5),
+  })));
+  return runTaskBatch(archiveTasks);
 }
 
 async function handleRedditResearch(req, res) {
@@ -241,37 +423,54 @@ async function handleRedditResearch(req, res) {
     const timeWindow = ['day', 'week', 'month', 'year', 'all'].includes(payload.timeWindow)
       ? payload.timeWindow
       : 'month';
+    const mode = normalizeResearchMode(payload.mode);
+    const queryVariants = buildQueryVariants(query);
     const subreddits = Array.isArray(payload.subreddits)
       ? payload.subreddits.map(cleanSubreddit).filter(Boolean).slice(0, 8)
       : [];
-    const targets = subreddits.length ? subreddits : defaultResearchSubreddits;
+    let targets = mode === 'custom'
+      ? subreddits
+      : (subreddits.length && mode === 'focused' ? subreddits : defaultResearchSubreddits);
+    if (mode === 'custom' && !targets.length) throw new Error('自定义模式至少需要输入 1 个 subreddit');
 
-    const rssResults = await Promise.allSettled(targets.map(sub => fetchRedditRSS(sub, query, timeWindow)));
-    const rssItems = rssResults.flatMap(result => result.status === 'fulfilled' ? result.value : []);
-    const rssErrors = rssResults
-      .map((result, index) => result.status === 'rejected' ? `${targets[index]}: ${result.reason && result.reason.message ? result.reason.message : '抓取失败'}` : '')
-      .filter(Boolean);
+    let discoveryItems = [];
+    let discoveredSubreddits = [];
+    let discoveryErrors = [];
+    if (mode === 'global') {
+      const discovery = await discoverRedditCommunities(queryVariants, timeWindow);
+      discoveryItems = discovery.items;
+      discoveredSubreddits = discovery.discovered;
+      discoveryErrors = discovery.errors;
+      targets = discoveredSubreddits.length
+        ? discoveredSubreddits.map(item => item.subreddit).slice(0, 8)
+        : defaultResearchSubreddits;
+    }
 
-    let items = dedupeItems(rssItems);
+    const rss = await fetchTargetedRedditItems(targets, queryVariants, timeWindow);
+    let items = onlyPostItems(dedupeItems(mode === 'global' ? [...discoveryItems, ...rss.items] : rss.items));
     let fallbackUsed = false;
     let archiveErrors = [];
     if (items.length < Math.min(4, limit)) {
       fallbackUsed = true;
-      const archiveResults = await Promise.allSettled(targets.map(sub => fetchPullPush(sub, query, 5)));
-      const archiveItems = archiveResults.flatMap(result => result.status === 'fulfilled' ? result.value : []);
-      archiveErrors = archiveResults
-        .map((result, index) => result.status === 'rejected' ? `${targets[index]}: ${result.reason && result.reason.message ? result.reason.message : '抓取失败'}` : '')
-        .filter(Boolean);
-      items = dedupeItems([...items, ...archiveItems]);
+      const archive = await fetchArchiveRedditItems(targets, queryVariants);
+      archiveErrors = archive.errors;
+      items = onlyPostItems(dedupeItems([...items, ...archive.items]));
     }
 
     items = items.slice(0, limit);
     if (!items.length) {
       sendJSON(res, 502, {
         error: {
-          message: '没有从 Reddit 抓到可用帖子，请换一个更具体的关键词再试。',
-          details: [...rssErrors, ...archiveErrors].slice(0, 8),
+          message: hasCJK(query)
+            ? '这次没有抓到可用帖子。系统已经把中文议题扩展成英文关键词，但当前主题仍然没有稳定命中，请换成更具体的场景、人群或工具名称。'
+            : '没有从 Reddit 抓到可用帖子，请换一个更具体的关键词再试。',
+          details: [...discoveryErrors, ...rss.errors, ...archiveErrors].slice(0, 8),
         },
+        query,
+        queryVariants,
+        mode,
+        subreddits: targets,
+        discoveredSubreddits,
       });
       return true;
     }
@@ -280,12 +479,15 @@ async function handleRedditResearch(req, res) {
       ok: true,
       source: fallbackUsed ? 'reddit-rss+pullpush' : 'reddit-rss',
       query,
+      queryVariants,
+      mode,
       subreddits: targets,
+      discoveredSubreddits,
       timeWindow,
       fetchedAt: new Date().toISOString(),
       total: items.length,
       items,
-      warnings: [...rssErrors, ...archiveErrors].slice(0, 8),
+      warnings: [...discoveryErrors, ...rss.errors, ...archiveErrors].slice(0, 8),
     });
   } catch (err) {
     sendJSON(res, 502, { error: { message: err && err.message ? err.message : 'Reddit 调研抓取失败' } });
