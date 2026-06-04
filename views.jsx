@@ -41,15 +41,32 @@ function PresetModal({ store, onClose }) {
   const [apiDraft, setApiDraft] = useState(() => ({ ...store.data.modelConfig }));
   const [apiImport, setApiImport] = useState('');
   const [testingApi, setTestingApi] = useState(false);
+  const [closing, setClosing] = useState(false);
   const firstRef = useRef(null);
+  const closeTimerRef = useRef(null);
   const providers = window.LLM_PROVIDER_TEMPLATES || [];
   const currentProvider = providers.find(p => p.id === apiDraft.provider) || providers[0];
 
+  function requestClose() {
+    if (closing) return;
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) {
+      onClose();
+      return;
+    }
+    setClosing(true);
+    closeTimerRef.current = setTimeout(onClose, 210);
+  }
+
   useEffect(() => {
-    const onKey = e => { if (e.key === 'Escape') onClose(); };
+    const onKey = e => { if (e.key === 'Escape') requestClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [closing, onClose]);
+
+  useEffect(() => () => {
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+  }, []);
 
   const startNew = () => { setDraft({ id: window.uid(), name: '', bg: '', domain: '', style: '' }); setMode('edit'); };
   const startEdit = (p) => { setDraft({ ...p }); setMode('edit'); };
@@ -104,12 +121,13 @@ function PresetModal({ store, onClose }) {
   };
 
   return (
-    <div className="scrim" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="scrim" data-closing={closing ? 'true' : undefined}
+         onMouseDown={e => { if (e.target === e.currentTarget) requestClose(); }}>
       <div className="sheet" role="dialog" aria-modal="true" aria-label="设置与设定">
         <div className="sheet__head">
           <span className="brand__mark" style={{ width: 32, height: 32 }}><Icon name="sliders" size={18} /></span>
           <h2 className="sheet__title">{mode === 'list' ? '设置与设定' : (store.data.presets.some(p=>p.id===draft.id) ? '编辑设定' : '新建设定')}</h2>
-          <button className="btn btn--icon" onClick={onClose} aria-label="关闭"><Icon name="close" /></button>
+          <button className="btn btn--icon" onClick={requestClose} aria-label="关闭"><Icon name="close" /></button>
         </div>
 
         {mode === 'list' ? (
@@ -258,7 +276,7 @@ function PresetModal({ store, onClose }) {
             <div className="sheet__foot">
               <button className="btn btn--primary" onClick={startNew}><Icon name="plus" size={18} /><span className="btn__label">新建设定</span></button>
               <span className="spacer" />
-              <button className="btn btn--ghost" onClick={onClose}>完成</button>
+              <button className="btn btn--ghost" onClick={requestClose}>完成</button>
             </div>
           </>
         ) : (
