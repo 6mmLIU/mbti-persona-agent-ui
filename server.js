@@ -1,10 +1,15 @@
 const http = require('node:http');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 
 const root = __dirname;
 const port = Number(process.env.PORT || 4174);
-const maxBodyBytes = 2 * 1024 * 1024;
+const maxBodyBytes = 18 * 1024 * 1024;
+const maxExtractBytes = 10 * 1024 * 1024;
+const maxExtractChars = 24000;
 const redditUserAgent = 'mbti-persona-research/1.0 (local development)';
 const defaultResearchSubreddits = ['SideProject', 'startups', 'Entrepreneur', 'SaaS', 'indiehackers'];
 const validResearchModes = new Set(['focused', 'global', 'custom']);
@@ -125,6 +130,89 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+}
+
+function parseDataUrl(value) {
+  const match = String(value || '').match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+  if (!match || !match[2]) return null;
+  const type = (match[1] || 'application/octet-stream').toLowerCase();
+  const buffer = Buffer.from(match[3], 'base64');
+  return { type, buffer };
+}
+
+function safeUploadExt(name, type) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  const byType = {
+    'application/pdf': '.pdf',
+    'application/msword': '.doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/rtf': '.rtf',
+    'text/rtf': '.rtf',
+    'text/plain': '.txt',
+    'text/markdown': '.md',
+    'text/csv': '.csv',
+    'application/json': '.json',
+  };
+  if (/^\.[a-z0-9]{1,12}$/.test(ext)) return ext;
+  return byType[String(type || '').toLowerCase()] || '.bin';
+}
+
+function isPlainTextUpload(name, type) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  return String(type || '').startsWith('text/') ||
+    ['.txt', '.md', '.csv', '.json', '.js', '.jsx', '.ts', '.tsx', '.css', '.html', '.xml', '.yaml', '.yml', '.log'].includes(ext);
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const maxOutput = options.maxOutput || 512 * 1024;
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`${command} 提取超时`));
+    }, options.timeout || 12000);
+    let stdout = Buffer.alloc(0);
+    let stderr = '';
+    child.stdout.on('data', chunk => {
+      if (stdout.length < maxOutput) stdout = Buffer.concat([stdout, chunk]).slice(0, maxOutput);
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString('utf8').slice(0, 1000);
+    });
+    child.on('error', err => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+    child.on('close', code => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve(stdout.toString('utf8').replace(/\s+\n/g, '\n').trim());
+      } else {
+        reject(new Error((stderr || `${command} 退出码 ${code}`).trim()));
+      }
+    });
+  });
+}
+
+async function extractUploadText(filePath, name, type) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  if (isPlainTextUpload(name, type)) {
+    return fs.readFileSync(filePath, 'utf8').slice(0, maxExtractChars);
+  }
+  if (type === 'application/pdf' || ext === '.pdf') {
+    return (await runCommand('pdftotext', ['-layout', '-enc', 'UTF-8', filePath, '-'], {
+      timeout: 16000,
+      maxOutput: 1024 * 1024,
+    })).slice(0, maxExtractChars);
+  }
+  if (['.doc', '.docx', '.rtf'].includes(ext) ||
+      ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/rtf', 'text/rtf'].includes(type)) {
+    return (await runCommand('textutil', ['-convert', 'txt', '-stdout', filePath], {
+      timeout: 16000,
+      maxOutput: 1024 * 1024,
+    })).slice(0, maxExtractChars);
+  }
+  return '';
 }
 
 function cleanHeaders(headers) {
@@ -646,6 +734,50 @@ async function handleProxy(req, res) {
   return true;
 }
 
+async function handleFileExtract(req, res) {
+  if (req.method === 'GET' && req.url === '/api/extract-file/health') {
+    sendJSON(res, 200, { ok: true, source: 'local-extractor' });
+    return true;
+  }
+  if (req.method !== 'POST' || req.url !== '/api/extract-file') return false;
+
+  let tmpPath = '';
+  try {
+    const payload = JSON.parse(await readBody(req) || '{}');
+    const parsed = parseDataUrl(payload.dataUrl);
+    if (!parsed) throw new Error('上传内容格式不正确');
+    if (parsed.buffer.length > maxExtractBytes) throw new Error('文件超过 10MB，请压缩或分段上传');
+
+    const name = String(payload.name || 'upload').replace(/[^\w.\-\u4e00-\u9fa5 ]+/g, '').slice(0, 120) || 'upload';
+    const type = String(payload.type || parsed.type || 'application/octet-stream').toLowerCase();
+    const ext = safeUploadExt(name, type);
+    tmpPath = path.join(os.tmpdir(), `mbti-upload-${crypto.randomUUID()}${ext}`);
+    fs.writeFileSync(tmpPath, parsed.buffer);
+
+    const text = await extractUploadText(tmpPath, name, type);
+    sendJSON(res, 200, {
+      ok: true,
+      name,
+      type,
+      size: parsed.buffer.length,
+      text,
+      truncated: text.length >= maxExtractChars,
+      message: text
+        ? '已提取文本'
+        : '已上传，但当前本地抽取器暂不支持解析这个文件类型',
+    });
+  } catch (err) {
+    sendJSON(res, 422, {
+      error: {
+        message: err && err.message ? err.message : '文件解析失败',
+      },
+    });
+  } finally {
+    if (tmpPath) fs.rm(tmpPath, { force: true }, () => {});
+  }
+  return true;
+}
+
 function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
@@ -672,6 +804,7 @@ function serveStatic(req, res) {
 const server = http.createServer(async (req, res) => {
   if (await handleRedditResearch(req, res)) return;
   if (await handleProxy(req, res)) return;
+  if (await handleFileExtract(req, res)) return;
   serveStatic(req, res);
 });
 

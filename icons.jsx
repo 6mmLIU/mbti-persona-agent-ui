@@ -25,6 +25,11 @@ const Icon = ({ name, size = 20, stroke = 1.75, className = '' }) => {
     layers: <><path {...p} d="M12 3.5 21 8l-9 4.5L3 8z"/><path {...p} d="M3 13l9 4.5L21 13"/></>,
     bookmark:<><path {...p} d="M6.5 4.5h11a1 1 0 0 1 1 1V20l-6.5-3.4L5.5 20V5.5a1 1 0 0 1 1-1z"/></>,
     database:<><ellipse {...p} cx="12" cy="6" rx="7" ry="3"/><path {...p} d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path {...p} d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></>,
+    search: <><circle {...p} cx="10.5" cy="10.5" r="6.5"/><path {...p} d="M16 16l4 4"/></>,
+    paperclip:<><path {...p} d="M8.5 12.5l5.9-5.9a3.4 3.4 0 0 1 4.8 4.8l-7.5 7.5a5 5 0 0 1-7.1-7.1l7.4-7.4a2.4 2.4 0 0 1 3.4 3.4l-7.2 7.2a1.2 1.2 0 0 1-1.7-1.7l6.4-6.4"/></>,
+    image:  <><rect {...p} x="4" y="5" width="16" height="14" rx="2.5"/><circle {...p} cx="9" cy="10" r="1.6"/><path {...p} d="M7 17l4.2-4.2 2.6 2.6 1.6-1.7L20 18"/></>,
+    file:   <><path {...p} d="M7 3.8h6l4 4V20a1.2 1.2 0 0 1-1.2 1.2H7A1.2 1.2 0 0 1 5.8 20V5A1.2 1.2 0 0 1 7 3.8z"/><path {...p} d="M13 4v4h4"/><path {...p} d="M8.5 13h7M8.5 16.5h5"/></>,
+    external:<><path {...p} d="M14 5h5v5"/><path {...p} d="M19 5l-8 8"/><path {...p} d="M19 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 18.5v-12A1.5 1.5 0 0 1 5.5 5H10"/></>,
   };
   return (
     <span className={'ico ' + className} aria-hidden="true" style={{ width: size, height: size }}>

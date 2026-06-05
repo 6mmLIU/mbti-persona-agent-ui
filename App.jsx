@@ -16,6 +16,9 @@ const RESEARCH_EXAMPLE_QS = [
 ];
 
 const RESEARCH_SUBREDDITS = ['SideProject', 'startups', 'Entrepreneur', 'SaaS', 'indiehackers'];
+const MAX_ATTACHMENTS = 8;
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const RESEARCH_MODE_OPTIONS = [
   {
     id: 'focused',
@@ -37,6 +40,112 @@ const RESEARCH_MODE_OPTIONS = [
   },
 ];
 const RESEARCH_MODE_LABELS = RESEARCH_MODE_OPTIONS.reduce((acc, item) => ({ ...acc, [item.id]: item.label }), {});
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+function attachmentKind(file) {
+  if (String(file.type || '').startsWith('image/')) return 'image';
+  if (String(file.type || '').startsWith('text/')) return 'text';
+  const ext = (file.name || '').toLowerCase().split('.').pop();
+  return ['txt', 'md', 'csv', 'json', 'js', 'jsx', 'ts', 'tsx', 'css', 'html', 'xml', 'yaml', 'yml', 'log'].includes(ext)
+    ? 'text'
+    : 'file';
+}
+
+function attachmentLabel(att) {
+  if (att.kind === 'image') return '图片';
+  if (att.text) return '文本';
+  return '文件';
+}
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function extractAttachmentText(file, dataUrl) {
+  const resp = await fetch('/api/extract-file', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      dataUrl,
+    }),
+  });
+  const payload = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const msg = payload && payload.error && payload.error.message ? payload.error.message : '文件解析失败';
+    throw new Error(msg);
+  }
+  return payload || {};
+}
+
+async function buildAttachment(file) {
+  const kind = attachmentKind(file);
+  const base = {
+    id: window.uid(),
+    name: file.name || '未命名文件',
+    type: file.type || 'application/octet-stream',
+    size: file.size || 0,
+    kind,
+    text: '',
+    dataUrl: '',
+    message: '',
+  };
+
+  if (kind === 'image') {
+    if (file.size > MAX_IMAGE_BYTES) throw new Error(`${base.name} 超过 6MB，请压缩后再上传`);
+    return { ...base, dataUrl: await readFileAsDataURL(file), message: '图片已作为视觉附件加入' };
+  }
+
+  if (file.size > MAX_FILE_BYTES) throw new Error(`${base.name} 超过 10MB，请压缩或拆分后再上传`);
+
+  if (kind === 'text') {
+    const text = await file.text();
+    return {
+      ...base,
+      text: text.slice(0, 24000),
+      message: text.length > 24000 ? '已读取前 24000 字' : '已读取文本',
+    };
+  }
+
+  const dataUrl = await readFileAsDataURL(file);
+  const extracted = await extractAttachmentText(file, dataUrl);
+  return {
+    ...base,
+    text: String(extracted.text || '').slice(0, 24000),
+    message: extracted.message || (extracted.text ? '已提取文本' : '已上传文件'),
+  };
+}
+
+function stripAttachmentForHistory(att) {
+  return {
+    id: att.id,
+    name: att.name,
+    type: att.type,
+    size: att.size,
+    kind: att.kind,
+    text: att.text ? String(att.text).slice(0, 5000) : '',
+    message: att.kind === 'image' ? '图片内容仅保留在当前会话，历史中不保存 base64' : att.message,
+  };
+}
+
+function stripRoundForHistory(round) {
+  return {
+    ...round,
+    attachments: Array.isArray(round.attachments) ? round.attachments.map(stripAttachmentForHistory) : [],
+  };
+}
 
 function parseCustomSubreddits(value) {
   const seen = new Set();
@@ -200,6 +309,70 @@ function formatSourceDate(value) {
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
 }
 
+function sourceDomain(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function sourceKey(source) {
+  if (!source) return '';
+  return String(source.url || `${source.title || ''}|${source.domain || ''}`).trim().toLowerCase();
+}
+
+function normalizeRoundSource(source, index) {
+  if (!source) return null;
+  if (typeof source === 'string') {
+    const value = source.trim();
+    if (!value) return null;
+    const isUrl = /^https?:\/\//i.test(value);
+    return {
+      title: isUrl ? (sourceDomain(value) || `网页来源 ${index + 1}`) : value,
+      url: isUrl ? value : '',
+      domain: isUrl ? sourceDomain(value) : '',
+      snippet: '',
+      personas: [],
+      number: index + 1,
+    };
+  }
+  const url = String(source.url || source.uri || source.href || '').trim();
+  const domain = String(source.domain || sourceDomain(url) || '').trim();
+  const title = String(source.title || source.name || domain || `网页来源 ${index + 1}`).trim();
+  const snippet = String(source.snippet || source.excerpt || source.cited_text || source.summary || '').replace(/\s+/g, ' ').trim();
+  if (!url && !title) return null;
+  return { title, url, domain, snippet, personas: [], number: index + 1 };
+}
+
+function collectRoundSources(round) {
+  const results = round && round.results ? round.results : {};
+  const sources = [];
+  const byKey = new Map();
+  Object.entries(results).forEach(([code, result]) => {
+    const list = result && Array.isArray(result.citations)
+      ? result.citations
+      : (result && Array.isArray(result.sources) ? result.sources : []);
+    list.forEach(raw => {
+      const source = normalizeRoundSource(raw, sources.length);
+      const key = sourceKey(source);
+      if (!source || !key) return;
+      if (!byKey.has(key)) {
+        byKey.set(key, source);
+        sources.push(source);
+      }
+      const saved = byKey.get(key);
+      if (code && !saved.personas.includes(code)) saved.personas.push(code);
+    });
+  });
+  sources.forEach((source, i) => { source.number = i + 1; });
+  const index = sources.reduce((acc, source) => {
+    acc[sourceKey(source)] = source.number;
+    return acc;
+  }, {});
+  return { sources, index };
+}
+
 function ResearchEvidencePanel({ research, loading, error, compact = false, mode = 'focused', customSubreddits = '' }) {
   const items = research && Array.isArray(research.items) ? research.items : [];
   const isEmpty = !loading && !error && !items.length;
@@ -284,12 +457,62 @@ function ResearchEvidencePanel({ research, loading, error, compact = false, mode
   );
 }
 
+function ModelSearchSidebar({ sources, round }) {
+  const isRunning = round && round.status === 'running';
+  return (
+    <aside className="model-source-panel" aria-label="模型联网搜索来源">
+      <div className="model-source-panel__head">
+        <span className="model-source-panel__icon"><Icon name="search" size={17} /></span>
+        <div>
+          <h3>联网来源</h3>
+          <p>{sources.length ? `${sources.length} 个网页资源 · 点击打开原网页` : (isRunning ? '等待模型返回网页出处' : '暂无可验证网页出处')}</p>
+        </div>
+      </div>
+      {sources.length > 0 ? (
+        <div className="model-source-list">
+          {sources.map(source => {
+            const body = (
+              <>
+                <span className="model-source__num">{source.number}</span>
+                <span className="model-source__body">
+                  <span className="model-source__meta">{source.domain || '网页来源'}</span>
+                  <strong>{source.title}</strong>
+                  {source.snippet && <span className="model-source__snippet">{source.snippet}</span>}
+                </span>
+                {source.url && <Icon name="external" size={15} />}
+              </>
+            );
+            return source.url ? (
+              <a className="model-source" href={source.url} target="_blank" rel="noreferrer" key={`${source.number}-${source.url}`}>
+                {body}
+              </a>
+            ) : (
+              <div className="model-source model-source--plain" key={`${source.number}-${source.title}`}>
+                {body}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        isRunning ? (
+          <div className="model-source-empty" aria-label="来源加载中">
+            {[0, 1, 2].map(i => <span className="skel" key={i} />)}
+          </div>
+        ) : (
+          <p className="model-source-none">这轮回答没有返回可点击的网页来源。可以重试一次，或换用支持原生搜索引用的模型。</p>
+        )
+      )}
+    </aside>
+  );
+}
+
 function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onSummarize, running }) {
   const results = round.results || {};
   const doneCount = Object.values(results).filter(r => r && r.status !== 'loading').length;
   const totalCount = window.PERSONAS.length;
   const summarizing = round.summaryStatus === 'loading';
   const canSummarize = doneCount === totalCount && !running && !summarizing;
+  const { sources, index: citationIndex } = collectRoundSources(round);
   return (
     <article className="round-panel" data-current={isLatest ? 'true' : 'false'}>
       <header className="round-head">
@@ -310,21 +533,36 @@ function RoundPanel({ round, isLatest, view, gridRef, onFav, store, onRetry, onS
       {round.summaryStatus === 'error' && (
         <p className="round-error" role="status">总结失败：{round.summaryError || '请稍后重试'}</p>
       )}
-      {round.research && <ResearchEvidencePanel research={round.research} compact={true} />}
-      {summarizing && (
-        <div className="summary-panel summary-panel--loading" role="status">
-          <span className="dot" />正在把 16 个人格的观点整理成可追问的上下文…
+      {round.webSearch && !round.research && (
+        <div className="model-search-note" role="status">
+          <Icon name="search" size={16} />
+          <span>已开启模型内置联网搜索。搜索由当前模型供应商执行，不使用 Reddit 数据采集。</span>
         </div>
       )}
-      {round.summary && <SummaryPanel summary={round.summary} round={round} />}
+      <div className={'round-workspace' + (round.webSearch && !round.research ? ' round-workspace--sources' : '')}>
+        <div className="round-main">
+          {round.research && <ResearchEvidencePanel research={round.research} compact={true} />}
+          <AttachmentTray attachments={round.attachments} compact={true} />
+          {summarizing && (
+            <div className="summary-panel summary-panel--loading" role="status">
+              <span className="dot" />正在把 16 个人格的观点整理成可追问的上下文…
+            </div>
+          )}
+          {round.summary && <SummaryPanel summary={round.summary} round={round} />}
 
-      <div className="persona-grid" data-view={view} ref={isLatest ? gridRef : null}>
-        {window.PERSONAS.map((p, i) => (
-          <div data-flip={isLatest ? p.code : `${round.id}-${p.code}`} key={p.code}>
-            <PersonaCard persona={p} state={results[p.code]} view={view}
-                         index={i} onFav={onFav} isFav={store.isFav} onRetry={() => onRetry(p, round.id)} />
+          <div className="persona-grid" data-view={view} ref={isLatest ? gridRef : null}>
+            {window.PERSONAS.map((p, i) => (
+              <div data-flip={isLatest ? p.code : `${round.id}-${p.code}`} key={p.code}>
+                <PersonaCard persona={p} state={results[p.code]} view={view}
+                             index={i} citationIndex={citationIndex}
+                             onFav={onFav} isFav={store.isFav} onRetry={() => onRetry(p, round.id)} />
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
+        {round.webSearch && !round.research && (
+          <ModelSearchSidebar sources={sources} round={round} />
+        )}
       </div>
     </article>
   );
@@ -346,6 +584,34 @@ function FollowupComposer({ value, onChange, onSubmit, running, viewingHistory }
         <Icon name="send" size={17} /><span className="btn__label">追问并开启下一轮</span>
       </button>
     </form>
+  );
+}
+
+function AttachmentTray({ attachments, onRemove, compact = false }) {
+  if (!Array.isArray(attachments) || !attachments.length) return null;
+  return (
+    <div className={'attachment-tray' + (compact ? ' attachment-tray--compact' : '')} aria-label="已上传附件">
+      {attachments.map(att => (
+        <div className="attachment-pill" key={att.id || att.name}>
+          <span className="attachment-pill__thumb">
+            {att.kind === 'image' && att.dataUrl
+              ? <img src={att.dataUrl} alt="" />
+              : <Icon name={att.kind === 'image' ? 'image' : 'file'} size={17} />}
+          </span>
+          <span className="attachment-pill__body">
+            <b>{att.name}</b>
+            <small>{attachmentLabel(att)} · {formatBytes(att.size)}{att.message ? ` · ${att.message}` : ''}</small>
+          </span>
+          {onRemove && (
+            <button type="button" className="attachment-pill__remove"
+                    aria-label={`移除 ${att.name}`}
+                    onClick={() => onRemove(att.id)}>
+              <Icon name="close" size={14} />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -523,6 +789,8 @@ function ResultsSection({
                               append: true,
                               mode: currentRound && currentRound.mode,
                               research: currentRound && currentRound.research,
+                              attachments: currentRound && currentRound.attachments,
+                              webSearch: currentRound && currentRound.webSearch,
                             });
                           }} />
       )}
@@ -538,6 +806,9 @@ function App() {
   const [route, setRoute] = useState('home');        // home | research | history | favorites
   const [showPresets, setShowPresets] = useState(false);
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [researchDraft, setResearchDraft] = useState('');
   const [researchMode, setResearchMode] = useState('focused');
   const [customSubreddits, setCustomSubreddits] = useState('');
@@ -558,6 +829,7 @@ function App() {
   const gridRef = useRef(null);
   const prevRects = useRef(null);
   const taRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   const doneCount = results ? Object.values(results).filter(r => r.status !== 'loading').length : 0;
   const totalCount = window.PERSONAS.length;
@@ -578,26 +850,94 @@ function App() {
   }
 
   function makeHistoryEntry(id, roundList) {
-    const last = roundList[roundList.length - 1];
+    const safeRounds = roundList.map(stripRoundForHistory);
+    const last = safeRounds[safeRounds.length - 1];
     return {
       id,
       ts: Date.now(),
-      question: roundList[0] ? roundList[0].question : '',
+      question: safeRounds[0] ? safeRounds[0].question : '',
       latestQuestion: last ? last.question : '',
-      roundCount: roundList.length,
+      roundCount: safeRounds.length,
       mode: last && last.mode ? last.mode : 'standard',
       research: last && last.research ? last.research : null,
+      webSearch: !!(last && last.webSearch),
       presetName: store.activePresetObj ? store.activePresetObj.name : '',
       results: last ? last.results : {},
-      rounds: roundList,
+      rounds: safeRounds,
     };
   }
 
-  async function fetchResearch(qRaw) {
+  async function addFiles(fileList) {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (!files.length) return;
+    const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+    if (!room) {
+      toast(`最多上传 ${MAX_ATTACHMENTS} 个附件`, 'close');
+      return;
+    }
+    const selected = files.slice(0, room);
+    if (files.length > room) toast(`已只加入前 ${room} 个附件`, 'close');
+    setAttachmentBusy(true);
+    try {
+      const built = [];
+      for (const file of selected) {
+        try {
+          built.push(await buildAttachment(file));
+        } catch (err) {
+          toast(err && err.message ? err.message : '附件读取失败', 'close');
+        }
+      }
+      if (built.length) {
+        setAttachments(prev => [...prev, ...built].slice(0, MAX_ATTACHMENTS));
+        toast(`已加入 ${built.length} 个附件`, 'paperclip');
+      }
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  function onFileChange(e) {
+    addFiles(e.target.files);
+    e.target.value = '';
+  }
+
+  function onPasteFiles(e) {
+    const files = Array.from(e.clipboardData && e.clipboardData.files ? e.clipboardData.files : []);
+    if (!files.length) return;
+    e.preventDefault();
+    addFiles(files);
+  }
+
+  function removeAttachment(id) {
+    setAttachments(prev => prev.filter(att => att.id !== id));
+  }
+
+  function hasActionableInput(value, list) {
+    return !!String(value || '').trim() || (Array.isArray(list) && list.length > 0);
+  }
+
+  async function runHomeAsk() {
+    const q = draft.trim() || (attachments.length ? '请分析并整理我上传的附件。' : '');
+    if (!q || running || attachmentBusy) return;
+    const useModelWebSearch = !!webSearchEnabled;
+    if (useModelWebSearch && !store.modelReady && !(window.LLM && window.LLM.hasBridge)) {
+      toast('联网搜索需要已连接模型 API，当前会用离线示例', 'close');
+    }
+    if (webSearchEnabled) {
+      setRoute('home');
+    }
+    await runAsk(q, {
+      mode: 'standard',
+      webSearch: useModelWebSearch,
+      attachments,
+    });
+  }
+
+  async function fetchResearch(qRaw, options = {}) {
     const q = (qRaw || researchDraft).trim();
     if (!q) return null;
-    const mode = researchMode;
-    const customTargets = parseCustomSubreddits(customSubreddits);
+    const mode = options.mode || researchMode;
+    const customTargets = parseCustomSubreddits(options.customSubreddits != null ? options.customSubreddits : customSubreddits);
     if (mode === 'custom' && !customTargets.length) {
       const msg = '自定义模式至少需要输入 1 个 subreddit';
       setResearchError(msg);
@@ -667,7 +1007,13 @@ function App() {
     const append = !!(options && options.append);
     const baseRounds = append ? rounds : [];
     const previousResearch = append && baseRounds.length ? baseRounds[baseRounds.length - 1].research : null;
+    const previousAttachments = append && baseRounds.length ? baseRounds[baseRounds.length - 1].attachments : [];
+    const previousWebSearch = append && baseRounds.length ? !!baseRounds[baseRounds.length - 1].webSearch : false;
     const research = (options && options.research) || previousResearch || null;
+    const askAttachments = (options && Array.isArray(options.attachments)) ? options.attachments : (previousAttachments || []);
+    const askWebSearch = options && Object.prototype.hasOwnProperty.call(options, 'webSearch')
+      ? !!options.webSearch
+      : previousWebSearch;
     const mode = (options && options.mode) || (research ? 'research' : 'standard');
     const roundId = window.uid();
     const historyId = append && activeHistoryId ? activeHistoryId : window.uid();
@@ -693,8 +1039,11 @@ function App() {
       summaryStatus: 'idle',
       mode,
       research,
+      webSearch: askWebSearch,
+      attachments: askAttachments,
     };
     setRounds([...baseRounds, newRound]);
+    if (!append) setAttachments([]);
     setTimeout(() => {
       const el = document.getElementById('results-anchor');
       if (el) window.scrollTo({ top: el.offsetTop - 80, behavior: reduced ? 'auto' : 'smooth' });
@@ -705,9 +1054,9 @@ function App() {
       collected[code] = payload;
       setResults(prev => ({ ...prev, [code]: payload }));
       updateRound(roundId, r => ({ results: { ...r.results, [code]: payload } }));
-    }, 6, baseRounds, research);
+    }, 6, baseRounds, research, askAttachments, askWebSearch);
     setRunning(false);
-    const finalRound = { ...newRound, results: collected, status: 'done', mode, research };
+    const finalRound = { ...newRound, results: collected, status: 'done', mode, research, webSearch: askWebSearch, attachments: askAttachments };
     const finalRounds = [...baseRounds, finalRound];
     setRounds(finalRounds);
     setActiveRoundIndex(finalRounds.length - 1);
@@ -718,7 +1067,9 @@ function App() {
       ? `已完成，${failed} 个人格使用兜底示例`
       : (mode === 'research'
         ? `已结合 ${research && research.items ? research.items.length : 0} 条 Reddit 素材生成回应`
-        : (store.modelReady ? '16 个人格已通过模型回应' : '已生成示例回应（未连接模型）')), 'spark');
+        : (askWebSearch
+          ? '已通过模型联网搜索能力生成回应'
+          : (store.modelReady ? '16 个人格已通过模型回应' : '已生成示例回应（未连接模型）'))), 'spark');
   }
 
   function openHistory(h) {
@@ -752,7 +1103,7 @@ function App() {
     const previousRounds = rounds.slice(0, idx);
     updateRound(roundId, r => ({ results: { ...r.results, [persona.code]: { status: 'loading' } } }));
     if (idx === rounds.length - 1) setResults(prev => ({ ...prev, [persona.code]: { status: 'loading' } }));
-    window.LLM.askPersona(persona, round.question, store.activePresetObj, store.data.modelConfig, previousRounds, round.research).then(res => {
+    window.LLM.askPersona(persona, round.question, store.activePresetObj, store.data.modelConfig, previousRounds, round.research, round.attachments, round.webSearch).then(res => {
       const nextPayload = { status: 'done', ...res };
       const updatedRounds = rounds.map(r => r.id === roundId
         ? { ...r, results: { ...r.results, [persona.code]: nextPayload }, summary: null, summaryStatus: 'idle' }
@@ -847,7 +1198,7 @@ function App() {
 
   /* keyboard: Cmd/Ctrl+Enter to submit */
   function onTaKey(e) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runAsk(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runHomeAsk(); }
   }
   function autoGrow(e) {
     const t = e.target; t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 180) + 'px';
@@ -900,18 +1251,44 @@ function App() {
                 {store.modelReady ? ` 当前模型：${store.modelLabel}。` : ' 当前为离线示例模式。'}
               </p>
 
-              <form className="ask" onSubmit={e => { e.preventDefault(); runAsk(); }}>
-                <textarea ref={taRef} className="ask__ta" rows={1} value={draft}
-                          aria-label="输入你的问题"
-                          placeholder="输入一个议题，让 16 种人格分别拆解。"
-                          onChange={autoGrow} onKeyDown={onTaKey} />
-                <button className="btn btn--primary ask__send" type="submit"
-                        data-loading={running ? 'true' : 'false'}
-                        aria-disabled={(!draft.trim() || running) ? 'true' : 'false'}
-                        disabled={!draft.trim() || running}>
-                  {running && <span className="btn__spin" />}
-                  <span className="btn__label row gap-2"><Icon name="send" size={18} />开始思考</span>
-                </button>
+              <form className="ask" onSubmit={e => { e.preventDefault(); runHomeAsk(); }}>
+                <div className="ask__main">
+                  <textarea ref={taRef} className="ask__ta" rows={1} value={draft}
+                            aria-label="输入你的问题"
+                            placeholder="输入一个议题，让 16 种人格分别拆解。"
+                            onChange={autoGrow} onKeyDown={onTaKey} onPaste={onPasteFiles} />
+                  <button className="btn btn--primary ask__send" type="submit"
+                          data-loading={running ? 'true' : 'false'}
+                          aria-disabled={(!hasActionableInput(draft, attachments) || running || attachmentBusy) ? 'true' : 'false'}
+                          disabled={!hasActionableInput(draft, attachments) || running || attachmentBusy}>
+                    {running && <span className="btn__spin" />}
+                    <span className="btn__label row gap-2"><Icon name="send" size={18} />{webSearchEnabled ? '联网思考' : '开始思考'}</span>
+                  </button>
+                </div>
+                <div className="ask__tools" aria-label="输入增强工具">
+                  <button className={'btn btn--ghost ask__tool' + (webSearchEnabled ? ' is-active' : '')}
+                          type="button"
+                          aria-pressed={webSearchEnabled}
+                          disabled={running || researchLoading}
+                          onClick={() => setWebSearchEnabled(v => !v)}>
+                    <Icon name="search" size={16} /><span className="btn__label">联网搜索</span>
+                  </button>
+                  <button className="btn btn--ghost ask__tool" type="button"
+                          title="上传文件或图片，也可以直接 Ctrl+V 粘贴图片"
+                          data-loading={attachmentBusy ? 'true' : 'false'}
+                          disabled={running || attachmentBusy}
+                          onClick={() => fileInputRef.current && fileInputRef.current.click()}>
+                    {attachmentBusy && <span className="btn__spin" />}
+                    <Icon name="paperclip" size={16} /><span className="btn__label">上传</span>
+                  </button>
+                  <input ref={fileInputRef}
+                         className="sr-only"
+                         type="file"
+                         multiple
+                         accept="image/*,.txt,.md,.csv,.json,.js,.jsx,.ts,.tsx,.css,.html,.xml,.yaml,.yml,.log,.pdf,.doc,.docx,.rtf"
+                         onChange={onFileChange} />
+                </div>
+                <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
               </form>
 
               <div className="askmeta">
@@ -927,7 +1304,11 @@ function App() {
                   数据
                 </button>
                 <span className={'askmeta__hint' + (running ? '' : '')}>
-                  {running ? `思考中 ${doneCount}/${totalCount}…` : 'Ctrl/⌘ + Enter 发送'}
+                  {attachmentBusy
+                    ? '正在读取附件…'
+                    : (running
+                      ? (webSearchEnabled ? `模型联网中 ${doneCount}/${totalCount}…` : `思考中 ${doneCount}/${totalCount}…`)
+                      : 'Ctrl/⌘ + Enter 发送')}
                 </span>
               </div>
 

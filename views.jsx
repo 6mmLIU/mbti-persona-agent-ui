@@ -354,6 +354,7 @@ function HistoryView({ store, onOpen }) {
             <span className="row gap-2"><Icon name="clock" size={15} />{timeAgo(h.ts)}</span>
             {h.presetName && <span className="row gap-2"><Icon name="layers" size={15} />{h.presetName}</span>}
             {h.mode === 'research' && <span className="row gap-2"><Icon name="database" size={15} />数据调研</span>}
+            {h.webSearch && <span className="row gap-2"><Icon name="search" size={15} />模型联网</span>}
             <span className="row gap-2"><Icon name="user" size={15} />{h.roundCount || 1} 轮 · {Object.keys(h.results || {}).length} 个人格</span>
           </div>
         </article>

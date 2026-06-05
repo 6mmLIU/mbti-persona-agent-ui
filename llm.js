@@ -88,6 +88,11 @@ window.LLM = (function () {
     };
   }
 
+  function outputBudget(cfg, webSearch = false) {
+    const base = Number((cfg && cfg.maxTokens) || 1100);
+    return webSearch ? Math.max(base, 1800) : base;
+  }
+
   function isConfigured(config) {
     const c = effectiveConfig(config);
     if (!c.enabled) return false;
@@ -183,11 +188,310 @@ ${digest}
 `;
   }
 
-  function buildPrompt(persona, question, preset, rounds, research) {
-    return `你是 MBTI 人格「${persona.code} · ${persona.name}」。你的思维特征：${persona.lens}
-请严格代入这种人格的思维方式来回应，不要中立、不要面面俱到，要有鲜明的角度与个性。
+  function attachmentDigest(attachments, maxItems = 8, maxChars = 14000) {
+    const items = Array.isArray(attachments) ? attachments : [];
+    if (!items.length) return '';
+    let remaining = maxChars;
+    const parts = [];
+    items.slice(0, maxItems).forEach((item, index) => {
+      const meta = [
+        item.name || `附件 ${index + 1}`,
+        item.type || '',
+        item.size ? `${Math.round(Number(item.size) / 1024)} KB` : '',
+      ].filter(Boolean).join(' · ');
+      const kind = item.kind === 'image' ? '图片' : (item.text ? '文本/文件' : '文件');
+      const text = String(item.text || '').replace(/\s+\n/g, '\n').trim();
+      let block = `${index + 1}. ${kind}：${meta}`;
+      if (text && remaining > 0) {
+        const excerpt = text.slice(0, Math.max(0, remaining));
+        remaining -= excerpt.length;
+        block += `\n内容摘录：\n${excerpt}`;
+        if (text.length > excerpt.length) block += '\n（此附件内容已截断）';
+      } else if (item.kind === 'image') {
+        block += '\n说明：这是一张图片。若当前模型收到视觉附件，请直接观察图片内容；如果当前模型不支持视觉，只能看到这个文件信息。';
+      } else {
+        block += '\n说明：这个文件没有可用文本摘录，请基于文件名、类型和用户问题谨慎判断。';
+      }
+      parts.push(block);
+    });
+    return parts.join('\n\n');
+  }
 
-${personaProfileBlock(persona)}${presetBlock(preset)}${conversationBlock(rounds, persona)}${researchBlock(research)}用户的问题 / 议题：
+  function attachmentBlock(attachments) {
+    const digest = attachmentDigest(attachments);
+    if (!digest) return '';
+    return `用户上传的附件：
+${digest}
+
+使用要求：
+- 如果附件包含文本，你必须把附件内容当作本轮分析的重要依据。
+- 如果附件是图片且当前模型支持视觉输入，你必须观察图片内容，而不是只根据文件名猜测。
+- 如果某个附件无法解析或当前模型不支持视觉，请明确说明这个限制，不要编造看不到的细节。
+
+`;
+  }
+
+  function webSearchBlock(webSearch) {
+    if (!webSearch) return '';
+    return `本轮已开启模型供应商内置联网搜索：
+- 如果当前 API 请求里提供了原生 Web Search / Google Search / Search API 工具，你必须优先使用该工具获取当前网页内容。
+- 你必须把用到的网页放进 sources 数组，包含真实 title、url、domain/snippet；不要编造来源。
+- 不管你代入的是哪一种人格，只要结论里用到了网页信息，都必须保留 sources；不要因为人格偏直觉、情绪、行动派就省略来源。
+- 正文里不要写裸 URL，也不要把引用做成 Markdown；应用会用 sources 自动渲染上标和右侧来源栏。
+- 如果当前模型或接口没有真正可用的内置搜索工具，不要假装已经联网；请在 conclusion 里明确说明无法确认实时信息，并基于已有上下文谨慎回答。
+
+`;
+  }
+
+  function splitDataUrl(dataUrl) {
+    const match = String(dataUrl || '').match(/^data:([^;,]+);base64,([\s\S]+)$/);
+    return match ? { type: match[1], data: match[2] } : null;
+  }
+
+  function modelLikelySupportsVision(cfg) {
+    const provider = cfg && cfg.provider;
+    const model = String((cfg && cfg.model) || '').toLowerCase();
+    if (provider === 'deepseek') return false;
+    if (provider === 'gemini' || provider === 'anthropic') return true;
+    if (provider === 'openai') return /(gpt-4o|gpt-4\.1|gpt-5|vision)/i.test(model);
+    if (provider === 'openrouter' || provider === 'custom') {
+      return /(gpt-4o|gpt-4\.1|gpt-5|gemini|claude|vision|vl|llava|pixtral|qwen.*vl|mistral.*vision)/i.test(model);
+    }
+    return false;
+  }
+
+  function imageAttachments(attachments, cfg) {
+    if (!modelLikelySupportsVision(cfg)) return [];
+    return (Array.isArray(attachments) ? attachments : [])
+      .filter(item => item && item.kind === 'image' && item.dataUrl && /^data:image\//i.test(item.dataUrl))
+      .slice(0, 4);
+  }
+
+  function chatUserContent(prompt, attachments, cfg) {
+    const images = imageAttachments(attachments, cfg);
+    if (!images.length) return prompt;
+    return [
+      { type: 'text', text: prompt },
+      ...images.map(item => ({
+        type: 'image_url',
+        image_url: { url: item.dataUrl },
+      })),
+    ];
+  }
+
+  function anthropicUserContent(prompt, attachments, cfg) {
+    const images = imageAttachments(attachments, cfg);
+    if (!images.length) return prompt;
+    return [
+      { type: 'text', text: prompt },
+      ...images.map(item => {
+        const parsed = splitDataUrl(item.dataUrl);
+        return parsed ? {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: parsed.type,
+            data: parsed.data,
+          },
+        } : null;
+      }).filter(Boolean),
+    ];
+  }
+
+  function geminiParts(prompt, attachments, cfg) {
+    const images = imageAttachments(attachments, cfg);
+    return [
+      { text: prompt },
+      ...images.map(item => {
+        const parsed = splitDataUrl(item.dataUrl);
+        return parsed ? {
+          inlineData: {
+            mimeType: parsed.type,
+            data: parsed.data,
+          },
+        } : null;
+      }).filter(Boolean),
+    ];
+  }
+
+  function applyReasoningDefaults(body, cfg) {
+    const model = String((cfg && cfg.model) || '').toLowerCase();
+    if (cfg && cfg.provider === 'openai' && /^(o1|o3|o4|gpt-5)/i.test(model)) {
+      body.reasoning_effort = 'high';
+    }
+    if (cfg && cfg.provider === 'openrouter' && /(reason|thinking|^(o1|o3|o4)|gpt-5)/i.test(model)) {
+      body.reasoning = { effort: 'high' };
+    }
+  }
+
+  function modelIsOpenAISearch(cfg) {
+    const model = String((cfg && cfg.model) || '').toLowerCase();
+    return /search/.test(model);
+  }
+
+  function applyNativeWebSearch(body, cfg, webSearch) {
+    if (!webSearch || !cfg) return;
+    if (cfg.provider === 'openai' && modelIsOpenAISearch(cfg)) {
+      body.web_search_options = {};
+    } else if (cfg.provider === 'openrouter') {
+      body.plugins = [{ id: 'web', engine: 'native', max_results: 5 }];
+    }
+  }
+
+  function applyGeminiWebSearch(body, webSearch) {
+    if (!webSearch) return;
+    body.tools = [{ googleSearch: {} }];
+  }
+
+  function anthropicEndpoint(endpoint) {
+    const e = String(endpoint || '').replace(/\/+$/, '');
+    if (!e) return 'https://api.anthropic.com/v1/messages';
+    if (/\/v1\/messages$/i.test(e)) return e;
+    if (/\/messages$/i.test(e)) return e;
+    return e + '/v1/messages';
+  }
+
+  function deepSeekAnthropicEndpoint(cfg) {
+    return anthropicEndpoint(
+      cfg && cfg.endpoint && /\/anthropic/i.test(cfg.endpoint)
+        ? cfg.endpoint
+        : 'https://api.deepseek.com/anthropic'
+    );
+  }
+
+  function messageTextFromAnthropic(data) {
+    if (!data || !Array.isArray(data.content)) return '';
+    return data.content.map(part => part && part.text ? part.text : '').join('');
+  }
+
+  function hostFromUrl(url) {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./i, '');
+      return host || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function normalizeCitationSource(source, index = 0) {
+    if (!source) return null;
+    if (typeof source === 'string') {
+      const value = source.trim();
+      if (!value) return null;
+      const looksLikeUrl = /^https?:\/\//i.test(value);
+      return {
+        id: index + 1,
+        title: looksLikeUrl ? (hostFromUrl(value) || `网页来源 ${index + 1}`) : value,
+        url: looksLikeUrl ? value : '',
+        domain: looksLikeUrl ? hostFromUrl(value) : '',
+        snippet: '',
+      };
+    }
+    const src = source.url_citation || source.web || source;
+    const rawUrl = src.url || src.uri || src.href || src.link || src.source_url || '';
+    const url = String(rawUrl || '').trim();
+    const title = String(src.title || src.name || src.source || src.siteName || src.site || '').trim();
+    const snippet = String(src.snippet || src.excerpt || src.cited_text || src.text || src.summary || '').replace(/\s+/g, ' ').trim();
+    const domain = String(src.domain || src.hostname || src.host || hostFromUrl(url)).trim();
+    if (!url && !title) return null;
+    return {
+      id: index + 1,
+      title: title || domain || `网页来源 ${index + 1}`,
+      url,
+      domain,
+      snippet: snippet.slice(0, 240),
+    };
+  }
+
+  function mergeCitations() {
+    const out = [];
+    const seen = new Set();
+    Array.from(arguments).flat(Infinity).forEach((item) => {
+      const normalized = normalizeCitationSource(item, out.length);
+      if (!normalized) return;
+      const key = (normalized.url || `${normalized.title}|${normalized.domain}`).toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      normalized.id = out.length + 1;
+      out.push(normalized);
+    });
+    return out.slice(0, 12);
+  }
+
+  function citationsFromOpenAI(data) {
+    const message = data && data.choices && data.choices[0] && data.choices[0].message;
+    const annotations = message && Array.isArray(message.annotations) ? message.annotations : [];
+    const direct = annotations.map(item => item && (item.url_citation || item)).filter(Boolean);
+    const toolCitations = [];
+    const toolResults = Array.isArray(message && message.tool_results) ? message.tool_results : [];
+    toolResults.forEach(result => {
+      const results = result && (result.results || result.items || result.sources);
+      if (Array.isArray(results)) toolCitations.push(...results);
+    });
+    return mergeCitations(direct, toolCitations);
+  }
+
+  function citationsFromAnthropicContent(parts) {
+    const found = [];
+    const walk = (value) => {
+      if (!value) return;
+      if (Array.isArray(value)) {
+        value.forEach(walk);
+        return;
+      }
+      if (typeof value !== 'object') return;
+      if (Array.isArray(value.citations)) found.push(...value.citations);
+      if (value.url || value.uri || value.href) found.push(value);
+      if (value.type === 'web_search_tool_result' || value.type === 'server_tool_result') {
+        ['content', 'results', 'items', 'sources'].forEach(key => walk(value[key]));
+      }
+    };
+    walk(parts);
+    return mergeCitations(found);
+  }
+
+  function citationsFromAnthropic(data) {
+    return citationsFromAnthropicContent(data && data.content);
+  }
+
+  function citationsFromGemini(data) {
+    const candidates = data && Array.isArray(data.candidates) ? data.candidates : [];
+    const chunks = [];
+    candidates.forEach(candidate => {
+      const meta = candidate && (candidate.groundingMetadata || candidate.grounding_metadata);
+      const groundingChunks = meta && (meta.groundingChunks || meta.grounding_chunks);
+      if (Array.isArray(groundingChunks)) {
+        groundingChunks.forEach(chunk => {
+          if (chunk && chunk.web) chunks.push(chunk.web);
+          else if (chunk) chunks.push(chunk);
+        });
+      }
+      const supports = meta && (meta.groundingSupports || meta.grounding_supports);
+      if (Array.isArray(supports)) {
+        supports.forEach(support => {
+          const seg = support && (support.segment || support.grounding_segment);
+          if (seg && (seg.text || seg.cited_text)) chunks.push(seg);
+        });
+      }
+    });
+    return mergeCitations(chunks);
+  }
+
+  function citationsFromText(text) {
+    const value = String(text || '');
+    const urls = value.match(/https?:\/\/[^\s"'<>，。）、)]+/g) || [];
+    return mergeCitations(urls.map(url => ({ url, title: hostFromUrl(url) || url })));
+  }
+
+  function responsePayload(text, citations) {
+    return { text: String(text || ''), citations: mergeCitations(citations) };
+  }
+
+  function buildPrompt(persona, question, preset, rounds, research, attachments, webSearch) {
+    return `你是 MBTI 人格「${persona.code} · ${persona.name}」。你的思维特征：${persona.lens}
+请严格代入这种人格的思维方式来回应，不要中立、不要面面俱到，要有鲜明的角度与个性。默认进行最深入的内部分析，但最终只输出精炼结果。
+
+${personaProfileBlock(persona)}${presetBlock(preset)}${conversationBlock(rounds, persona)}${researchBlock(research)}${attachmentBlock(attachments)}${webSearchBlock(webSearch)}用户的问题 / 议题：
 「${question}」
 
 请只输出一个 JSON 对象，不要任何额外文字、不要 Markdown 代码块，键如下：
@@ -196,15 +500,18 @@ ${personaProfileBlock(persona)}${presetBlock(preset)}${conversationBlock(rounds,
   "thinking": "你切入这个问题的思维方式与角度（1-2句，≤60字）",
   "conclusion": "你的最终结论（120-220字，第一人称，像真实的人在说话；必须说明为什么这样判断、如何取舍、下一步先做什么；语气要明显符合该人格，不要复述点子）",
   "ideas": ["具体点子或建议1（≤40字）", "点子2", "点子3"],
-  "tags": ["关注点标签1", "标签2", "标签3"]
+  "tags": ["关注点标签1", "标签2", "标签3"],
+  "sources": [{"title":"网页标题或来源名","url":"https://example.com/path","domain":"example.com","snippet":"一句话说明它支撑了哪个判断"}]
 }
 这是一个严格的 json 输出任务：最终回答必须能被 JSON.parse 直接解析。
 conclusion 是最重要的部分，要让人感觉 16 个人格都在用自己的性格认真发言，而不是同一个模型换标签。
-ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags 为 2-4 个简短关键词。全部用中文。`;
+ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags 为 2-4 个简短关键词。全部用中文。
+如果本轮没有启用联网搜索或没有真实网页依据，sources 输出空数组。`;
   }
 
-  function buildMessages(persona, question, preset, rounds, research) {
-    return [{ role: 'user', content: buildPrompt(persona, question, preset, rounds, research) }];
+  function buildMessages(persona, question, preset, rounds, research, attachments, webSearch, cfg) {
+    const prompt = buildPrompt(persona, question, preset, rounds, research, attachments, webSearch);
+    return [{ role: 'user', content: cfg ? chatUserContent(prompt, attachments, cfg) : prompt }];
   }
 
   function extractJSON(text) {
@@ -234,13 +541,72 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
   }
 
-  function textFallbackObject(text, persona, question) {
+  function unquoteJSONishValue(value) {
+    let v = String(value || '').trim();
+    if (v.startsWith('"')) v = v.slice(1);
+    if (v.endsWith('"')) v = v.slice(0, -1);
+    return v
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '')
+      .replace(/\\t/g, ' ')
+      .trim();
+  }
+
+  function extractJSONishField(text, key) {
+    const raw = String(text || '');
+    const marker = new RegExp(`"${key}"\\s*:\\s*`);
+    const match = marker.exec(raw);
+    if (!match) return '';
+    const start = match.index + match[0].length;
+    const tail = raw.slice(start);
+    const next = tail.search(/,\s*"(signature|thinking|conclusion|ideas|tags|sources|citations|references)"\s*:/);
+    const value = next >= 0 ? tail.slice(0, next) : tail.replace(/\s*}\s*$/, '');
+    return unquoteJSONishValue(value);
+  }
+
+  function extractJSONishArray(text, key) {
+    const raw = String(text || '');
+    const marker = new RegExp(`"${key}"\\s*:\\s*`);
+    const match = marker.exec(raw);
+    if (!match) return [];
+    const start = match.index + match[0].length;
+    const tail = raw.slice(start);
+    const next = tail.search(/,\s*"(signature|thinking|conclusion|ideas|tags|sources|citations|references)"\s*:/);
+    const value = (next >= 0 ? tail.slice(0, next) : tail.replace(/\s*}\s*$/, '')).trim();
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return Array.from(value.matchAll(/"([^"]+)"/g)).map(m => unquoteJSONishValue(m[1])).filter(Boolean);
+    }
+  }
+
+  function extractJSONishObject(text) {
+    const raw = String(text || '').trim();
+    if (!/"conclusion"\s*:/.test(raw)) return null;
+    const obj = {
+      signature: extractJSONishField(raw, 'signature'),
+      thinking: extractJSONishField(raw, 'thinking'),
+      conclusion: extractJSONishField(raw, 'conclusion'),
+      ideas: extractJSONishArray(raw, 'ideas'),
+      tags: extractJSONishArray(raw, 'tags'),
+      sources: extractJSONishArray(raw, 'sources'),
+    };
+    return obj.conclusion || obj.thinking || obj.signature ? obj : null;
+  }
+
+  function textFallbackObject(text, persona, question, citations) {
     const cleaned = String(text || '')
       .replace(/^```(?:json)?/i, '')
       .replace(/```$/,'')
       .replace(/^\s*(结论|回答|最终结论)\s*[:：]/, '')
       .trim();
     if (!cleaned) return null;
+    const nested = extractJSON(cleaned);
+    if (nested) return nested;
+    const jsonish = extractJSONishObject(cleaned);
+    if (jsonish) return jsonish;
     const canned = cannedAnswer(persona, question);
     return {
       signature: persona.sig,
@@ -248,17 +614,72 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       conclusion: cleaned.slice(0, 520),
       ideas: canned.ideas,
       tags: persona.tags,
+      sources: citations || [],
     };
   }
 
-  function normalize(obj, persona) {
+  function unwrapNestedObject(obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    for (const key of ['conclusion', 'answer', 'content', 'text', 'result']) {
+      if (typeof obj[key] === 'string') {
+        const nested = extractJSON(obj[key]) || extractJSONishObject(obj[key]);
+        if (nested && typeof nested === 'object') {
+          return { ...obj, ...nested };
+        }
+      }
+    }
+    return obj;
+  }
+
+  function cleanModelText(value) {
+    return String(value || '')
+      .replace(/^```(?:json)?/i, '')
+      .replace(/```$/,'')
+      .replace(/\s*(?:https?:\/\/[^\s"'<>，。）、)]+)\s*/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  function usefulIdea(value) {
+    const text = cleanModelText(value);
+    if (!text) return false;
+    const compact = text.replace(/\s+/g, '');
+    if (compact.length <= 2) return false;
+    if (/^(在|或|和|与|及|的|了|把|用|为|对|从|中|上|下|先|再|并|但|这|那)$/.test(compact)) return false;
+    if (/^["'“”‘’、，。；：:,.!?！？[\](){}]+$/.test(compact)) return false;
+    return /[\u4e00-\u9fa5A-Za-z0-9]/.test(compact);
+  }
+
+  function mergeIdeas(primary, fallback) {
+    const seen = new Set();
+    const out = [];
+    [...primary, ...fallback].forEach(item => {
+      const text = cleanModelText(item);
+      const key = text.replace(/\s+/g, '').toLowerCase();
+      if (!usefulIdea(text) || seen.has(key)) return;
+      seen.add(key);
+      out.push(text);
+    });
+    return out.slice(0, 4);
+  }
+
+  function normalize(obj, persona, citations, question, research) {
+    const safe = unwrapNestedObject(obj);
     const arr = v => Array.isArray(v) ? v.filter(Boolean).map(String) : (v ? [String(v)] : []);
+    const sourceList = mergeCitations(
+      safe && (safe.sources || safe.citations || safe.references || safe.webSources),
+      citations || []
+    );
+    const fallback = cannedAnswer(persona, question, research);
+    const ideas = mergeIdeas(safe && safe.ideas ? arr(safe.ideas) : [], fallback.ideas || []);
     return {
-      signature: (obj && obj.signature ? String(obj.signature) : persona.sig).slice(0, 40),
-      thinking:  obj && obj.thinking ? String(obj.thinking) : persona.essence,
-      conclusion: obj && obj.conclusion ? String(obj.conclusion) : fallbackConclusion(persona),
-      ideas:     (obj && obj.ideas ? arr(obj.ideas) : []).slice(0, 4),
-      tags:      (obj && obj.tags && arr(obj.tags).length ? arr(obj.tags) : persona.tags).slice(0, 4),
+      signature: (safe && safe.signature ? String(safe.signature) : persona.sig).slice(0, 40),
+      thinking:  safe && safe.thinking ? String(safe.thinking) : persona.essence,
+      conclusion: safe && safe.conclusion ? cleanModelText(safe.conclusion) : fallback.conclusion,
+      ideas,
+      tags:      (safe && safe.tags && arr(safe.tags).length ? arr(safe.tags) : persona.tags).slice(0, 4),
+      citations: sourceList,
+      sources: sourceList,
     };
   }
 
@@ -324,18 +745,45 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     return e + '/chat/completions';
   }
 
-  async function requestOpenAICompatible(persona, question, preset, cfg, rounds, research, withJsonMode = true) {
+  async function requestDeepSeekWebSearch(persona, question, preset, cfg, rounds, research, attachments, withJsonMode = true) {
+    const prompt = buildPrompt(persona, question, preset, rounds, research, attachments, true);
     const body = {
       model: cfg.model,
-      messages: buildMessages(persona, question, preset, rounds, research),
+      max_tokens: outputBudget(cfg, true),
       temperature: cfg.temperature,
-      max_tokens: cfg.maxTokens,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+      thinking: { type: 'enabled' },
+    };
+    if (withJsonMode && cfg.jsonMode) {
+      body.system = '最终回答必须是一个 JSON 对象，不要 Markdown，不要额外解释。';
+    }
+    const data = await parseResponse(await modelFetch(deepSeekAnthropicEndpoint(cfg), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': cfg.apiKey,
+        'anthropic-version': cfg.apiVersion || '2023-06-01',
+      },
+      body: JSON.stringify(body),
+    }));
+    return responsePayload(messageTextFromAnthropic(data), citationsFromAnthropic(data));
+  }
+
+  async function requestOpenAICompatible(persona, question, preset, cfg, rounds, research, attachments, webSearch, withJsonMode = true) {
+    if (cfg.provider === 'deepseek' && webSearch) {
+      return requestDeepSeekWebSearch(persona, question, preset, cfg, rounds, research, attachments, withJsonMode);
+    }
+    const body = {
+      model: cfg.model,
+      messages: buildMessages(persona, question, preset, rounds, research, attachments, webSearch, cfg),
+      temperature: cfg.temperature,
+      max_tokens: outputBudget(cfg, webSearch),
       stream: false,
     };
     if (withJsonMode && cfg.jsonMode) body.response_format = { type: 'json_object' };
-    if (cfg.provider === 'deepseek') {
-      body.thinking = { type: 'disabled' };
-    }
+    applyReasoningDefaults(body, cfg);
+    applyNativeWebSearch(body, cfg, webSearch);
 
     const headers = {
       'Content-Type': 'application/json',
@@ -352,18 +800,24 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         headers,
         body: JSON.stringify(body),
       }));
-      return data && data.choices && data.choices[0] && data.choices[0].message
-        ? data.choices[0].message.content
-        : '';
+      const message = data && data.choices && data.choices[0] && data.choices[0].message;
+      return responsePayload(message ? message.content : '', citationsFromOpenAI(data));
     } catch (err) {
       if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
-        return requestOpenAICompatible(persona, question, preset, cfg, rounds, research, false);
+        return requestOpenAICompatible(persona, question, preset, cfg, rounds, research, attachments, webSearch, false);
       }
       throw err;
     }
   }
 
-  async function requestAnthropic(persona, question, preset, cfg, rounds, research) {
+  async function requestAnthropic(persona, question, preset, cfg, rounds, research, attachments, webSearch) {
+    const body = {
+      model: cfg.model,
+      max_tokens: outputBudget(cfg, webSearch),
+      temperature: cfg.temperature,
+      messages: [{ role: 'user', content: anthropicUserContent(buildPrompt(persona, question, preset, rounds, research, attachments, webSearch), attachments, cfg) }],
+    };
+    if (webSearch) body.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }];
     const data = await parseResponse(await modelFetch(cfg.endpoint || 'https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -372,29 +826,23 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         'anthropic-version': cfg.apiVersion || '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true',
       },
-      body: JSON.stringify({
-        model: cfg.model,
-        max_tokens: cfg.maxTokens,
-        temperature: cfg.temperature,
-        messages: buildMessages(persona, question, preset, rounds, research),
-      }),
+      body: JSON.stringify(body),
     }));
-    return data && Array.isArray(data.content)
-      ? data.content.map(part => part && part.text ? part.text : '').join('')
-      : '';
+    return responsePayload(messageTextFromAnthropic(data), citationsFromAnthropic(data));
   }
 
-  async function requestGemini(persona, question, preset, cfg, rounds, research, withJsonMode = true) {
+  async function requestGemini(persona, question, preset, cfg, rounds, research, attachments, webSearch, withJsonMode = true) {
     const url = (cfg.endpoint || 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent')
       .replace('{model}', encodeURIComponent(cfg.model));
     const body = {
-      contents: [{ role: 'user', parts: [{ text: buildPrompt(persona, question, preset, rounds, research) }] }],
+      contents: [{ role: 'user', parts: geminiParts(buildPrompt(persona, question, preset, rounds, research, attachments, webSearch), attachments, cfg) }],
       generationConfig: {
         temperature: cfg.temperature,
-        maxOutputTokens: cfg.maxTokens,
+        maxOutputTokens: outputBudget(cfg, webSearch),
       },
     };
     if (withJsonMode && cfg.jsonMode) body.generationConfig.responseMimeType = 'application/json';
+    applyGeminiWebSearch(body, webSearch);
 
     try {
       const data = await parseResponse(await modelFetch(url, {
@@ -407,10 +855,10 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       }));
       const parts = data && data.candidates && data.candidates[0] &&
         data.candidates[0].content && data.candidates[0].content.parts;
-      return Array.isArray(parts) ? parts.map(part => part.text || '').join('') : '';
+      return responsePayload(Array.isArray(parts) ? parts.map(part => part.text || '').join('') : '', citationsFromGemini(data));
     } catch (err) {
       if (withJsonMode && cfg.jsonMode && shouldRetryWithoutJsonMode(err)) {
-        return requestGemini(persona, question, preset, cfg, rounds, research, false);
+        return requestGemini(persona, question, preset, cfg, rounds, research, attachments, webSearch, false);
       }
       throw err;
     }
@@ -477,7 +925,7 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
       stream: false,
     };
     if (withJsonMode && cfg.jsonMode) body.response_format = { type: 'json_object' };
-    if (cfg.provider === 'deepseek') body.thinking = { type: 'disabled' };
+    applyReasoningDefaults(body, cfg);
     const headers = {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${cfg.apiKey}`,
@@ -503,31 +951,36 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
   }
 
-  async function requestProvider(persona, question, preset, config, rounds, research) {
+  async function requestProvider(persona, question, preset, config, rounds, research, attachments, webSearch) {
     const cfg = effectiveConfig(config);
-    const text = cfg.kind === 'anthropic'
-      ? await requestAnthropic(persona, question, preset, cfg, rounds, research)
+    const payload = cfg.kind === 'anthropic'
+      ? await requestAnthropic(persona, question, preset, cfg, rounds, research, attachments, webSearch)
       : cfg.kind === 'gemini'
-        ? await requestGemini(persona, question, preset, cfg, rounds, research)
-        : await requestOpenAICompatible(persona, question, preset, cfg, rounds, research);
+        ? await requestGemini(persona, question, preset, cfg, rounds, research, attachments, webSearch)
+        : await requestOpenAICompatible(persona, question, preset, cfg, rounds, research, attachments, webSearch);
+    const text = payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'text')
+      ? payload.text
+      : String(payload || '');
+    const providerCitations = payload && typeof payload === 'object' ? payload.citations : [];
+    const responseCitations = mergeCitations(providerCitations, citationsFromText(text));
     const parsed = extractJSON(text);
-    const fallback = parsed || textFallbackObject(text, persona, question);
-    if (!fallback) throw new Error('模型返回了空内容，请重试或调高最大输出长度');
-    return normalize(fallback, persona);
+    const fallback = parsed || textFallbackObject(text, persona, question, responseCitations);
+    if (!fallback) throw new Error('模型返回了空内容；联网搜索或深度思考可能占用了输出预算，请重试或把最大输出长度调到 1800 以上');
+    return normalize(fallback, persona, responseCitations, question, research);
   }
 
-  async function requestBridge(persona, question, preset, rounds, research) {
-    const text = await window.claude.complete({ messages: buildMessages(persona, question, preset, rounds, research) });
+  async function requestBridge(persona, question, preset, rounds, research, attachments, webSearch) {
+    const text = await window.claude.complete({ messages: buildMessages(persona, question, preset, rounds, research, attachments, webSearch) });
     const parsed = extractJSON(text);
     if (!parsed) throw new Error('Claude 桥接没有返回可解析的 JSON');
-    return normalize(parsed, persona);
+    return normalize(parsed, persona, citationsFromText(text), question, research);
   }
 
-  async function askPersona(persona, question, preset, modelConfig, rounds, research) {
+  async function askPersona(persona, question, preset, modelConfig, rounds, research, attachments, webSearch) {
     if (isConfigured(modelConfig)) {
       let lastErr = null;
       for (let attempt = 0; attempt < 2; attempt++) {
-        try { return await requestProvider(persona, question, preset, modelConfig, rounds, research); }
+        try { return await requestProvider(persona, question, preset, modelConfig, rounds, research, attachments, webSearch); }
         catch (err) {
           lastErr = err;
           if (!shouldRetryError(err)) break;
@@ -538,14 +991,14 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     }
 
     if (hasBridge) {
-      try { return await requestBridge(persona, question, preset, rounds, research); }
+      try { return await requestBridge(persona, question, preset, rounds, research, attachments, webSearch); }
       catch (_) {}
     }
 
     return cannedAnswer(persona, question, research);
   }
 
-  async function askAll(personas, question, preset, modelConfig, onUpdate, concurrency = 6, rounds = [], research = null) {
+  async function askAll(personas, question, preset, modelConfig, onUpdate, concurrency = 6, rounds = [], research = null, attachments = [], webSearch = false) {
     if (typeof modelConfig === 'function') {
       onUpdate = modelConfig;
       modelConfig = null;
@@ -556,14 +1009,15 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
         const idx = i++;
         const p = personas[idx];
         try {
-          const res = await askPersona(p, question, preset, modelConfig, rounds, research);
+          const res = await askPersona(p, question, preset, modelConfig, rounds, research, attachments, webSearch);
           onUpdate(p.code, { status: 'done', ...res });
         } catch (e) {
           onUpdate(p.code, { status: 'error', _error: e && e.message ? e.message : '请求失败', ...cannedAnswer(p, question, research) });
         }
       }
     }
-    const pool = Array.from({ length: Math.min(concurrency, personas.length) }, worker);
+    const poolSize = webSearch ? Math.min(3, personas.length) : Math.min(concurrency, personas.length);
+    const pool = Array.from({ length: poolSize }, worker);
     await Promise.all(pool);
   }
 
@@ -592,6 +1046,17 @@ ideas 给 2-3 条，必须具体可执行、带有该人格鲜明视角。tags �
     ].filter(Boolean).join('\n');
   }
 
+  function roundAttachmentDigest(round) {
+    const digest = attachmentDigest(round && round.attachments, 6, 8000);
+    return digest || '本轮没有上传附件。';
+  }
+
+  function roundModelSearchDigest(round) {
+    return round && round.webSearch
+      ? '本轮开启了模型供应商内置联网搜索。若模型返回内容中包含实时信息，应按模型搜索结果谨慎总结；这不是 Reddit 数据调研。'
+      : '本轮没有开启模型内置联网搜索。';
+  }
+
   function buildSummaryPrompt(round, previousRounds) {
     const prev = Array.isArray(previousRounds) && previousRounds.length
       ? previousRounds.slice(-3).map((r, i) => {
@@ -610,6 +1075,12 @@ ${prev}
 
 本轮真实调研数据：
 ${roundResearchDigest(round)}
+
+本轮模型联网状态：
+${roundModelSearchDigest(round)}
+
+本轮上传附件：
+${roundAttachmentDigest(round)}
 
 本轮 16 个人格输出：
 ${roundDigest(round)}
